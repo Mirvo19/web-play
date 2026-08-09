@@ -89,7 +89,19 @@ class HackClubCDNProvider(CDNProvider):
         # Extract file ID or basename
         file_id = remote_path_or_url.split("/")[-1]
 
-        # Try API deletion endpoints
+        tried = []
+
+        # If the caller provided a full URL, try deleting that exact URL first.
+        if remote_path_or_url.startswith('http'):
+            try:
+                tried.append(remote_path_or_url)
+                resp = requests.delete(remote_path_or_url, headers=headers, timeout=15)
+                if resp.status_code in (200, 204, 404):
+                    return True
+            except Exception:
+                pass
+
+        # Try API deletion endpoints that accept an ID/key
         delete_endpoints = [
             f"{self.BASE_URL}/api/v4/files/{file_id}",
             f"{self.BASE_URL}/api/v4/delete/{file_id}",
@@ -98,14 +110,35 @@ class HackClubCDNProvider(CDNProvider):
 
         for endpoint in delete_endpoints:
             try:
+                tried.append(endpoint)
                 resp = requests.delete(endpoint, headers=headers, timeout=15)
                 if resp.status_code in (200, 204, 404):
                     return True
             except Exception:
                 continue
 
-        # If HTTP delete returns 200/204/404 assume deletion handled or file removed
-        return True
+        # Try POST-based deletion endpoint (some providers expect POST)
+        try:
+            post_endpoint = f"{self.BASE_URL}/api/v4/delete"
+            tried.append(post_endpoint)
+            resp = requests.post(post_endpoint, headers=headers, json={"id": file_id}, timeout=15)
+            if resp.status_code in (200, 204, 404):
+                return True
+        except Exception:
+            pass
+
+        # As a last resort, try deleting by the basename-only under the API root
+        try:
+            fallback = f"{self.BASE_URL}/{file_id}"
+            tried.append(fallback)
+            resp = requests.delete(fallback, headers=headers, timeout=15)
+            if resp.status_code in (200, 204, 404):
+                return True
+        except Exception:
+            pass
+
+        # If none of the attempts returned a definitive success, return False
+        return False
 
     def get_storage_info(self) -> Dict[str, int]:
         headers = {"Authorization": f"Bearer {self.api_key}"}

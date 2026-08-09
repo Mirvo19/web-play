@@ -62,8 +62,11 @@ def execute_video_deletion(job_id: str):
 
     for idx, f in enumerate(files):
         if cdn_provider:
+            # Prefer remote_url when available (more likely to be directly deletable)
+            identifier = f.remote_url or f.remote_path
             try:
-                success = cdn_provider.delete_file(f.remote_path)
+                log_delete_job(job_id, f"Attempting delete for {identifier}")
+                success = cdn_provider.delete_file(identifier)
                 if success:
                     f.upload_status = 'deleted'
                     f.deleted_at = datetime.now(timezone.utc)
@@ -71,10 +74,10 @@ def execute_video_deletion(job_id: str):
                     log_delete_job(job_id, f"Deleted remote file: {f.remote_path}")
                 else:
                     failed_count += 1
-                    log_delete_job(job_id, f"Failed to delete remote file (provider returned False): {f.remote_path}", level='WARNING')
+                    log_delete_job(job_id, f"Failed to delete remote file (provider returned False): {identifier}", level='WARNING')
             except Exception as e:
                 failed_count += 1
-                log_delete_job(job_id, f"Failed to delete remote file {f.remote_path}: {str(e)}", level='WARNING')
+                log_delete_job(job_id, f"Failed to delete remote file {identifier}: {str(e)}", level='WARNING')
         else:
             f.upload_status = 'deleted'
             f.deleted_at = datetime.now(timezone.utc)

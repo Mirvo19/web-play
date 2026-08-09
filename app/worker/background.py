@@ -57,12 +57,22 @@ def worker_loop(app: Flask):
                 if running_jobs < max_concurrent:
                     job = Job.query.filter_by(status='queued').order_by(Job.created_at.asc()).first()
                     if job:
+                        # Diagnostic logging to help trace why jobs may not be picked up
+                        try:
+                            if app.config.get('LOG_TO_STDOUT', False):
+                                print(f"[WORKER] Picking job {job.id} type={job.job_type} (created at {job.created_at})")
+                        except Exception:
+                            pass
                         if job.job_type == 'transcode_and_upload':
                             execute_video_pipeline(job.id)
                         elif job.job_type == 'delete_video':
                             execute_video_deletion(job.id)
         except Exception as e:
-            print(f"[Worker Error] Exception in background worker: {e}")
+            try:
+                if app.config.get('LOG_TO_STDOUT', False):
+                    print(f"[Worker Error] Exception in background worker: {e}")
+            except Exception:
+                pass
 
         time.sleep(2)
 
