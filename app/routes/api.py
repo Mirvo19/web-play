@@ -10,6 +10,7 @@ from werkzeug.utils import secure_filename
 from app.auth import login_required
 from app.models import db, Video, VideoVariant, VideoFile, Job, CDNAccount, Setting, JobLog, StorageSnapshot
 from app.cdn.manager import CDNManager
+from app.worker.pipeline import request_job_cancel
 
 api_bp = Blueprint('api', __name__, url_prefix='/api')
 
@@ -238,34 +239,17 @@ def delete_video_api(video_id):
     }), 202
 
 
-@api_bp.route('/cdn-accounts', methods=['GET', 'POST'])
+@api_bp.route('/jobs/<job_id>/cancel', methods=['POST'])
 @login_required
-def handle_cdn_accounts():
-    if request.method == 'GET':
-        accounts = CDNAccount.query.order_by(CDNAccount.created_at.desc()).all()
-        return jsonify([acc.to_dict(include_storage=True) for acc in accounts])
-
-    # POST - Add new CDN account
-    data = request.get_json() or {}
-    name = data.get('name', '').strip()
-    provider = data.get('provider', 'Hack Club CDN').strip()
-    api_key = data.get('api_key', '').strip()
-
-    if not name or not api_key:
-        return jsonify({'error': 'Name and API Key are required'}), 400
-
-    account = CDNAccount(name=name, provider=provider)
-    account.set_api_key(api_key)
-    db.session.add(account)
-    db.session.commit()
-
-    # Test connection
-    success, msg = CDNManager.test_account(account)
+def cancel_job_api(job_id):
+    job = request_job_cancel(job_id)
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
     return jsonify({
-        'message': 'CDN Account saved successfully',
-        'account': account.to_dict(include_storage=True),
-        'connection_test': {'success': success, 'message': msg}
-    }), 201
+        'message': 'Cancellation requested',
+        'job_id': job.id,
+        'status': job.status
+    }), 200
 
 
 @api_bp.route('/cdn-accounts/<account_id>/test', methods=['POST'])

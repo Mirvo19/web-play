@@ -5,6 +5,7 @@ import requests
 import subprocess
 from datetime import datetime, timezone
 from flask import current_app
+import psutil
 from app.models import db, Video, VideoVariant, VideoFile, Job, JobLog, Setting, CDNAccount
 from app.cdn.manager import CDNManager
 from app.worker.ffmpeg_processor import (
@@ -13,8 +14,135 @@ from app.worker.ffmpeg_processor import (
     build_ffmpeg_transcode_command,
     extract_thumbnail
 )
-import shutil
 import threading
+
+# Active job control registry used to coordinate cancellation with the running pipeline.
+active_job_controllers = {}
+active_job_controllers_lock = threading.Lock()
+
+class JobCancelled(Exception):
+    pass
+
+class JobController:
+    def __init__(self, job_id: str):
+        self.job_id = job_id
+        self.cancellation_requested = False
+        self.process = None
+        self.lock = threading.Lock()
+
+    def request_cancel(self):
+        with self.lock:
+            self.cancellation_requested = True
+            proc = self.process
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            # Wait briefly for FFmpeg to exit, then force kill if needed
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+    def set_process(self, proc):
+        with self.lock:
+            self.process = proc
+
+    def clear_process(self):
+        with self.lock:
+            self.process = None
+
+    def should_cancel(self):
+        with self.lock:
+            return self.cancellation_requested
+
+
+def get_job_controller(job_id: str):
+    with active_job_controllers_lock:
+        return active_job_controllers.get(job_id)
+
+
+def register_job_controller(job_id: str):
+    controller = JobController(job_id)
+    with active_job_controllers_lock:
+        active_job_controllers[job_id] = controller
+    return controller
+
+
+def unregister_job_controller(job_id: str):
+    with active_job_controllers_lock:
+        active_job_controllers.pop(job_id, None)
+
+
+def request_job_cancel(job_id: str):
+    job = Job.query.get(job_id)
+    if not job:
+        return None
+    if job.status in ('completed', 'failed', 'cancelled'):
+        return job
+    if job.status == 'queued' or job.status == 'receiving':
+        job.status = 'cancelled'
+        job.current_step = 'Cancelled'
+        job.current_message = 'Job cancelled before processing'
+        job.completed_at = datetime.now(timezone.utc)
+        log_job(job_id, 'Cancellation requested before processing', level='WARNING')
+        db.session.commit()
+        return job
+    controller = get_job_controller(job_id)
+    if controller:
+        controller.request_cancel()
+    job.current_step = 'Cancellation requested'
+    job.current_message = 'Cancellation requested by user'
+    db.session.commit()
+    log_job(job_id, 'Cancellation requested', level='WARNING')
+    return job
+
+
+def should_cancel_job(job_id: str):
+    job = Job.query.get(job_id)
+    if job and job.status == 'cancelled':
+        return True
+    controller = get_job_controller(job_id)
+    return controller.should_cancel() if controller else False
+
+
+def cleanup_job_workspace(work_dir: str, job_id: str, reason: str = 'cancelled'):
+    if not os.path.exists(work_dir):
+        return
+    log_job(job_id, f"{reason.capitalize()} job: removing temporary files", level='WARNING')
+    for root, dirs, files in os.walk(work_dir, topdown=False):
+        for name in files:
+            try:
+                os.remove(os.path.join(root, name))
+            except Exception:
+                pass
+        for name in dirs:
+            try:
+                os.rmdir(os.path.join(root, name))
+            except Exception:
+                pass
+    try:
+        os.rmdir(work_dir)
+    except Exception:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def choose_safe_ffmpeg_threads(requested_threads: int):
+    cpu_threads = psutil.cpu_count(logical=True) or 1
+    physical_cores = psutil.cpu_count(logical=False) or max(1, cpu_threads // 2)
+    mem = psutil.virtual_memory()
+    if mem.total < 3 * 1024 * 1024 * 1024:
+        recommended = min(cpu_threads, 24)
+    elif mem.total < 6 * 1024 * 1024 * 1024:
+        recommended = min(cpu_threads, 32)
+    else:
+        recommended = min(cpu_threads, 40)
+    recommended = max(1, recommended)
+    return min(requested_threads, recommended)
 
 def log_job(job_id: str, message: str, level: str = 'INFO', metadata: str = None):
     """Write timestamped log entry to JobLog table."""
@@ -50,29 +178,36 @@ def execute_video_pipeline(job_id: str):
     if not job:
         return
 
-    job.status = 'processing'
-    job.started_at = datetime.now(timezone.utc)
-    db.session.commit()
+    controller = register_job_controller(job_id)
+    try:
+        video = Video.query.get(job.video_id)
+        if not video:
+            job.status = 'failed'
+            job.error_message = 'Associated video record not found.'
+            db.session.commit()
+            return
 
-    video = Video.query.get(job.video_id)
-    if not video:
-        job.status = 'failed'
-        job.error_message = 'Associated video record not found.'
+        upload_folder = current_app.config.get('UPLOAD_FOLDER', '/tmp/video-processing')
+        work_dir = os.path.join(upload_folder, video.id)
+        source_file = os.path.join(work_dir, video.original_filename or 'source.mp4')
+
+        if job.status == 'cancelled':
+            log_job(job_id, 'Job cancelled before pipeline start', level='WARNING')
+            cleanup_job_workspace(work_dir, job_id, reason='cancelled')
+            return
+
+        job.status = 'processing'
+        job.started_at = datetime.now(timezone.utc)
         db.session.commit()
-        return
 
-    cdn_account = CDNAccount.query.get(video.cdn_account_id)
-    if not cdn_account:
-        job.status = 'failed'
-        job.error_message = 'CDN Account not specified or missing.'
-        db.session.commit()
-        return
+        cdn_account = CDNAccount.query.get(video.cdn_account_id)
+        if not cdn_account:
+            job.status = 'failed'
+            job.error_message = 'CDN Account not specified or missing.'
+            db.session.commit()
+            return
 
-    cdn_provider = CDNManager.get_provider_instance(cdn_account)
-
-    upload_folder = current_app.config.get('UPLOAD_FOLDER', '/tmp/video-processing')
-    work_dir = os.path.join(upload_folder, video.id)
-    source_file = os.path.join(work_dir, video.original_filename or 'source.mp4')
+        cdn_provider = CDNManager.get_provider_instance(cdn_account)
 
     try:
         log_job(job_id, "Upload job started")
@@ -118,7 +253,8 @@ def execute_video_pipeline(job_id: str):
         for t in targets:
             log_job(job_id, f"  - Profile: {t['label']} ({t['width']}x{t['height']}) {'[Original]' if t['is_original'] else '[Step Down]'}")
 
-        threads = int(Setting.get('ffmpeg_threads', current_app.config.get('DEFAULT_FFMPEG_THREADS', 40)))
+        requested_threads = int(Setting.get('ffmpeg_threads', current_app.config.get('DEFAULT_FFMPEG_THREADS', 40)))
+        threads = choose_safe_ffmpeg_threads(requested_threads)
         preset = Setting.get('ffmpeg_preset', 'veryfast')
         crf = int(Setting.get('ffmpeg_crf', 23))
         segment_duration = int(Setting.get('hls_segment_duration', current_app.config.get('HLS_SEGMENT_DURATION', 6)))
@@ -144,6 +280,7 @@ def execute_video_pipeline(job_id: str):
             # Run ffmpeg and parse its -progress pipe:1 output to compute real-time progress
             try:
                 proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                controller.set_process(proc)
                 variant_done = False
                 last_reported = 0.0
                 parsed = {}
@@ -197,6 +334,9 @@ def execute_video_pipeline(job_id: str):
                             last_reported = overall
                             last_update_ts = now_ts
 
+                    if controller.should_cancel():
+                        raise JobCancelled()
+
                     if line.startswith('progress=') and line.split('=',1)[1] == 'end':
                         variant_done = True
 
@@ -214,6 +354,9 @@ def execute_video_pipeline(job_id: str):
                     subprocess.run(fallback_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 else:
                     log_job(job_id, f"Variant {target['label']} encoding complete")
+            except JobCancelled:
+                log_job(job_id, 'FFmpeg cancelled by request', level='WARNING')
+                raise
             except Exception as err:
                 log_job(job_id, f"FFmpeg warning for {target['label']}: {str(err)[:200]}", level='WARNING')
 
@@ -221,10 +364,16 @@ def execute_video_pipeline(job_id: str):
             update_job_progress(job_id, f"Encoded {target['label']}", current_base_prog)
             variant_dirs.append((target, v_dir, playlist_file))
 
+        if controller.should_cancel():
+            raise JobCancelled()
+
         # Extract Thumbnail
         thumb_local_path = os.path.join(work_dir, 'thumbnail.jpg')
         log_job(job_id, "Generating video thumbnail frame")
         extract_thumbnail(source_file, thumb_local_path, timestamp_sec=min(2.0, meta['duration'] * 0.1))
+
+        if controller.should_cancel():
+            raise JobCancelled()
 
         # Step 5: Generate Master Playlist
         log_job(job_id, "Generating HLS master playlist (master.m3u8)")
@@ -238,6 +387,9 @@ def execute_video_pipeline(job_id: str):
 
         update_job_progress(job_id, "Uploading to CDN", 55.0)
         log_job(job_id, f"HLS segment generation complete. Preparing upload to {cdn_account.name}")
+
+        if controller.should_cancel():
+            raise JobCancelled()
 
         # Step 6: Upload Segments & Playlists to CDN
         uploaded_files_count = 0
@@ -308,6 +460,8 @@ def execute_video_pipeline(job_id: str):
                 remote_name = f"{video.id}/{target['label']}/{s_file}"
                 # Update current file state
                 update_job_progress(job_id, f"Uploading to CDN — {files_processed+1}/{total_files_to_upload}: {target['label']}/{s_file}", 55.0 + (30.0 * (bytes_uploaded / max(1, total_bytes_to_upload))))
+                if controller.should_cancel():
+                    raise JobCancelled()
                 res = cdn_provider.upload_file(s_path, remote_name)
                 v_file = VideoFile(
                     video_id=video.id,
@@ -334,6 +488,8 @@ def execute_video_pipeline(job_id: str):
             for p_file in playlist_files:
                 p_path = os.path.join(v_dir, p_file)
                 remote_name = f"{video.id}/{target['label']}/{p_file}"
+                if controller.should_cancel():
+                    raise JobCancelled()
                 update_job_progress(job_id, f"Uploading to CDN — playlist {target['label']}", 55.0 + (30.0 * (bytes_uploaded / max(1, total_bytes_to_upload))))
                 res = cdn_provider.upload_file(p_path, remote_name)
                 v_record.playlist_url = res['url']
@@ -352,6 +508,8 @@ def execute_video_pipeline(job_id: str):
                 bytes_uploaded += res.get('file_size', 0)
 
         # Step 7: Upload Master Playlist
+        if controller.should_cancel():
+            raise JobCancelled()
         master_res = cdn_provider.upload_file(master_playlist_path, f"{video.id}/master.m3u8")
         master_v_file = VideoFile(
             video_id=video.id,
@@ -372,9 +530,15 @@ def execute_video_pipeline(job_id: str):
         log_job(job_id, "CDN upload complete ✓")
         update_job_progress(job_id, "Verifying CDN files", 90.0)
 
+        if controller.should_cancel():
+            raise JobCancelled()
+
         # Step 8: Verifying remote CDN files
         log_job(job_id, "Verifying remote CDN files...")
         log_job(job_id, f"✓ Verified master playlist and thumbnail on {cdn_account.name}")
+
+        if controller.should_cancel():
+            raise JobCancelled()
 
         # Step 9: EXPLICIT LOCAL CLEANUP
         update_job_progress(job_id, "Cleaning local server", 95.0)
@@ -402,6 +566,15 @@ def execute_video_pipeline(job_id: str):
         update_job_progress(job_id, "Complete", 100.0)
         db.session.commit()
 
+    except JobCancelled:
+        db.session.rollback()
+        job.status = 'cancelled'
+        job.current_step = 'Cancelled'
+        job.current_message = 'Job cancelled by user'
+        job.completed_at = datetime.now(timezone.utc)
+        log_job(job_id, 'Job cancelled and cleanup started', level='WARNING')
+        cleanup_job_workspace(work_dir, job_id, reason='cancelled')
+        db.session.commit()
     except Exception as e:
         db.session.rollback()
         job.status = 'failed'
@@ -412,3 +585,6 @@ def execute_video_pipeline(job_id: str):
         # Clean local directory on error
         if os.path.exists(work_dir):
             shutil.rmtree(work_dir, ignore_errors=True)
+    finally:
+        controller.clear_process()
+        unregister_job_controller(job_id)

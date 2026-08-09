@@ -45,9 +45,14 @@
         </select>
       </div>
 
-      <button type="submit" id="startUploadBtn" class="btn btn-primary" style="width: 100%; margin-top: 1rem;" {% if not cdn_accounts %}disabled{% endif %}>
-        Start Upload & Processing
-      </button>
+      <div style="display: flex; gap: 0.75rem; margin-top: 1rem;">
+        <button type="submit" id="startUploadBtn" class="btn btn-primary" style="flex: 1;" {% if not cdn_accounts %}disabled{% endif %}>
+          Start Upload & Processing
+        </button>
+        <button type="button" id="cancelUploadBtn" class="btn btn-danger" style="flex: 1;" disabled onclick="cancelCurrentJob()">
+          Cancel Job
+        </button>
+      </div>
     </form>
   </div>
 
@@ -95,6 +100,7 @@
   let logPollInterval = null;
   let jobStatus = null;
   let uploadToastId = null;
+  let currentUploadXhr = null;
 
   // Resume polling if an active job exists in localStorage
   window.addEventListener('load', () => {
@@ -102,6 +108,7 @@
     if (stored) {
       activeJobId = stored;
       document.getElementById('pipelineContainer').style.display = 'block';
+      document.getElementById('cancelUploadBtn').disabled = false;
       startLogPolling(activeJobId);
     }
   });
@@ -118,19 +125,14 @@
     const cdnAccountId = document.getElementById('cdnSelect').value;
 
     const btn = document.getElementById('startUploadBtn');
+    const cancelBtn = document.getElementById('cancelUploadBtn');
     btn.disabled = true;
     btn.textContent = 'Uploading... 0%';
+    cancelBtn.disabled = false;
 
     document.getElementById('pipelineContainer').style.display = 'block';
 
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('title', title);
-    formData.append('description', description);
-    formData.append('cdn_account_id', cdnAccountId);
-
     try {
-      // Step 1: initialize Video + Job on server and get upload URL
       const initForm = new FormData();
       initForm.append('title', title);
       initForm.append('description', description);
@@ -143,9 +145,10 @@
       });
       const initData = await initResp.json();
       if (!initResp.ok) {
-        alert('Failed to initialize upload: ' + (initData.error || initData.message || ''));
+        showToast({ type: 'error', title: 'Upload init failed', message: initData.error || initData.message || 'Unable to initialize upload' });
         btn.disabled = false;
         btn.textContent = 'Start Upload & Processing';
+        cancelBtn.disabled = true;
         return;
       }
 
@@ -154,14 +157,12 @@
       document.getElementById('pipelineContainer').style.display = 'block';
       startLogPolling(activeJobId);
 
-      // Step 2: perform an XMLHttpRequest so we can show upload progress accurately
-      const xhr = new XMLHttpRequest();
-      xhr.open('PUT', initData.upload_url, true);
+      currentUploadXhr = new XMLHttpRequest();
+      currentUploadXhr.open('PUT', initData.upload_url, true);
 
-      // create a persistent toast for upload
       uploadToastId = showProgressToast({ title: 'Uploading source', message: 'Starting upload...', autoDismiss: false });
 
-      xhr.upload.onprogress = function(ev) {
+      currentUploadXhr.upload.onprogress = function(ev) {
         if (ev.lengthComputable) {
           const pct = Math.round((ev.loaded / ev.total) * 100);
           document.getElementById('pipelineProgressBar').style.width = pct + '%';
@@ -175,89 +176,131 @@
         }
       };
 
-      xhr.onload = function() {
-        if (xhr.status >= 200 && xhr.status < 300) {
+      currentUploadXhr.onload = function() {
+        if (currentUploadXhr.status >= 200 && currentUploadXhr.status < 300) {
           btn.textContent = 'Upload complete — queued for processing';
           btn.disabled = true;
           updateToastProgress(uploadToastId, 100, 'Upload complete — queued');
-          setTimeout(()=> closeToast(uploadToastId), 900);
+          setTimeout(() => closeToast(uploadToastId), 900);
         } else {
-          showToast({ type: 'error', title: 'Upload failed', message: xhr.responseText || 'Upload error' });
+          showToast({ type: 'error', title: 'Upload failed', message: currentUploadXhr.responseText || 'Upload error' });
           closeToast(uploadToastId);
           btn.disabled = false;
           btn.textContent = 'Start Upload & Processing';
+          cancelBtn.disabled = true;
           localStorage.removeItem('hc_active_job_id');
         }
       };
 
-      xhr.onerror = function() {
+      currentUploadXhr.onerror = function() {
         showToast({ type: 'error', title: 'Network error', message: 'Network error during upload' });
         closeToast(uploadToastId);
         btn.disabled = false;
         btn.textContent = 'Start Upload & Processing';
+        cancelBtn.disabled = true;
         localStorage.removeItem('hc_active_job_id');
       };
 
-      xhr.send(file);
+      currentUploadXhr.send(file);
 
     } catch (err) {
-      alert("Network error streaming file upload.");
+      showToast({ type: 'error', title: 'Upload error', message: 'Network error streaming file upload.' });
+      const btn = document.getElementById('startUploadBtn');
+      const cancelBtn = document.getElementById('cancelUploadBtn');
       btn.disabled = false;
       btn.textContent = 'Start Upload & Processing';
+      cancelBtn.disabled = true;
+      localStorage.removeItem('hc_active_job_id');
     }
   });
+
+  function cancelCurrentJob() {
+    if (currentUploadXhr) {
+      currentUploadXhr.abort();
+    }
+    if (!activeJobId) {
+      return;
+    }
+    const cancelBtn = document.getElementById('cancelUploadBtn');
+    cancelBtn.disabled = true;
+    fetch(`/api/jobs/${activeJobId}/cancel`, { method: 'POST' })
+      .then(res => res.json())
+      .then(data => {
+        if (data.error) {
+          showToast({ type: 'error', title: 'Cancel failed', message: data.error });
+          cancelBtn.disabled = false;
+        } else {
+          showToast({ type: 'warning', title: 'Cancellation requested', message: 'Attempting to stop processing.' });
+        }
+      })
+      .catch(() => {
+        showToast({ type: 'error', title: 'Cancel failed', message: 'Unable to reach cancel endpoint.' });
+        cancelBtn.disabled = false;
+      });
+  }
 
   function startLogPolling(jobId) {
     if (logPollInterval) clearInterval(logPollInterval);
     
     logPollInterval = setInterval(async () => {
       try {
-        const resp = await fetch(`/api/jobs/${jobId}/logs`);
+        const resp = await fetch(`/api/jobs/${jobId}`);
         if (!resp.ok) return;
 
-        const data = await resp.json();
-        const job = data.job;
-        const logs = data.logs;
-        // Update progress bar and main step text from job record
+        const job = await resp.json();
         document.getElementById('pipelineProgressBar').style.width = `${job.progress}%`;
         document.getElementById('pipelineProgressText').textContent = `${Math.round(job.progress)}%`;
         document.getElementById('pipelineStepText').textContent = job.current_step || 'Processing...';
 
-        // Update button text based on status
         const btn = document.getElementById('startUploadBtn');
+        const cancelBtn = document.getElementById('cancelUploadBtn');
+
         if (job.status === 'processing') {
           btn.textContent = job.current_step && job.progress < 100 ? `${job.current_step} — ${Math.round(job.progress)}%` : 'Processing...';
           btn.disabled = true;
-          // show a single toast for job completion/failure
-          if(job.status === 'processing'){
-            // update a job-level progress toast if present
-            if(typeof uploadToastId !== 'undefined' && uploadToastId){
-              updateToastProgress(uploadToastId, Math.round(job.progress), job.current_step);
-            }
+          cancelBtn.disabled = false;
+          if (uploadToastId) {
+            updateToastProgress(uploadToastId, Math.round(job.progress), job.current_step);
+          }
         } else if (job.status === 'queued') {
           btn.textContent = 'Queued — Waiting...';
           btn.disabled = true;
+          cancelBtn.disabled = false;
         } else if (job.status === 'completed') {
           btn.textContent = 'Upload Complete';
           btn.disabled = false;
+          cancelBtn.disabled = true;
           showToast({ type: 'success', title: 'Job completed', message: 'Processing finished successfully' });
-          if(uploadToastId) closeToast(uploadToastId);
+          if (uploadToastId) closeToast(uploadToastId);
+          clearInterval(logPollInterval);
+          localStorage.removeItem('hc_active_job_id');
         } else if (job.status === 'failed') {
           btn.textContent = 'Processing Failed';
           btn.disabled = false;
+          cancelBtn.disabled = true;
           showToast({ type: 'error', title: 'Job failed', message: job.error_message || 'Processing failed' });
-          if(uploadToastId) closeToast(uploadToastId);
+          if (uploadToastId) closeToast(uploadToastId);
+          clearInterval(logPollInterval);
+          localStorage.removeItem('hc_active_job_id');
+        } else if (job.status === 'cancelled') {
+          btn.textContent = 'Cancelled';
+          btn.disabled = false;
+          cancelBtn.disabled = true;
+          showToast({ type: 'warning', title: 'Job cancelled', message: 'Processing was cancelled.' });
+          if (uploadToastId) closeToast(uploadToastId);
+          clearInterval(logPollInterval);
+          localStorage.removeItem('hc_active_job_id');
         }
 
-        // Update explicit stage indicators based on job.current_step and logs
+        const logsResp = await fetch(`/api/jobs/${jobId}/logs`);
+        if (!logsResp.ok) return;
+        const data = await logsResp.json();
+        const logs = data.logs;
         const stageEls = document.querySelectorAll('#pipelineStages .stage-item');
         stageEls.forEach(el => {
-          const target = el.getAttribute('data-stage');
           el.setAttribute('data-state', 'pending');
           el.textContent = `[ ] ${el.textContent.replace(/^[\[\] ✓→!]+\s*/, '')}`;
         });
-
-        // Mark stages as completed when logs contain confirmation lines
         const textLogs = logs.map(l => l.message).join('\n');
         const markIf = (selector, check) => {
           const el = document.querySelector(selector);
@@ -267,7 +310,6 @@
             el.textContent = '✓ ' + el.textContent.replace(/^[\[\]\s✓→!]+/, '').trim();
           }
         };
-
         markIf('#stage-receive', (logsTxt) => /Received file:/i.test(logsTxt));
         markIf('#stage-validate', (logsTxt) => /File validated/i.test(logsTxt));
         markIf('#stage-inspect', (logsTxt) => /Resolution detected:/i.test(logsTxt));
@@ -277,23 +319,12 @@
         markIf('#stage-upload-cdn', (logsTxt) => /CDN upload complete/i.test(logsTxt) || /Uploaded segment/i.test(logsTxt));
         markIf('#stage-verify', (logsTxt) => /Verified master playlist/i.test(logsTxt));
         markIf('#stage-cleanup', (logsTxt) => /Local source deleted|Local HLS files deleted|Temporary directory removed/i.test(logsTxt));
-        if (job.status === 'completed') {
-          const el = document.querySelector('#stage-complete');
-          if (el) { el.setAttribute('data-state','completed'); el.textContent = '✓ Completed'; }
-          clearInterval(logPollInterval);
-          localStorage.removeItem('hc_active_job_id');
-        }
-        if (job.status === 'failed') {
-          localStorage.removeItem('hc_active_job_id');
-        }
 
-        // Render real logs
         const logBox = document.getElementById('logConsole');
         logBox.textContent = logs.map(l => l.message).join('\n');
         logBox.scrollTop = logBox.scrollHeight;
-
       } catch (e) {
-        console.error("Log fetch error:", e);
+        console.error('Log fetch error:', e);
       }
     }, 1000);
   }

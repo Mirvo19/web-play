@@ -10,7 +10,12 @@
       <h3 class="clay-card-title">Job #{{ job.id }}</h3>
       <span style="font-size: 0.8rem; color: var(--color-muted);">Type: {{ job.job_type }} | Status: {{ job.status }}</span>
     </div>
-    <a href="{{ url_for('views.jobs_list') }}" class="btn">Back to Jobs</a>
+    <div style="display: flex; gap: 0.75rem; align-items: center;">
+      {% if job.status in ['queued', 'processing'] %}
+      <button id="cancelJobBtn" class="btn btn-danger" onclick="cancelJob()">Cancel Job</button>
+      {% endif %}
+      <a href="{{ url_for('views.jobs_list') }}" class="btn">Back to Jobs</a>
+    </div>
   </div>
 
   <div style="margin-bottom: 1.5rem;">
@@ -34,6 +39,25 @@
 <script>
   const jobId = "{{ job.id }}";
   let _jobDetailToastId = null;
+
+  async function cancelJob() {
+    const btn = document.getElementById('cancelJobBtn');
+    if (btn) btn.disabled = true;
+    try {
+      const resp = await fetch(`/api/jobs/${jobId}/cancel`, { method: 'POST' });
+      const data = await resp.json();
+      if (!resp.ok) {
+        showToast({ type: 'error', title: 'Cancel failed', message: data.error || 'Unable to cancel job' });
+        if (btn) btn.disabled = false;
+        return;
+      }
+      showToast({ type: 'warning', title: 'Cancellation requested', message: 'Stopping job execution.' });
+    } catch (e) {
+      showToast({ type: 'error', title: 'Cancel failed', message: 'Unable to reach cancel endpoint.' });
+      if (btn) btn.disabled = false;
+    }
+  }
+
   setInterval(async () => {
     try {
       const resp = await fetch(`/api/jobs/${jobId}/logs`);

@@ -48,6 +48,8 @@
               <span class="badge badge-warning">Processing</span>
             {% elif job.status == 'queued' %}
               <span class="badge badge-info">Queued</span>
+            {% elif job.status == 'cancelled' %}
+              <span class="badge badge-secondary">Cancelled</span>
             {% else %}
               <span class="badge badge-danger">Failed</span>
             {% endif %}
@@ -59,6 +61,11 @@
             <a href="{{ url_for('views.job_detail', job_id=job.id) }}" class="btn" style="padding: 0.35rem 0.7rem; font-size: 0.8rem;">
               View Logs
             </a>
+            {% if job.status in ['queued', 'processing'] %}
+            <button type="button" class="btn btn-danger" style="padding: 0.35rem 0.7rem; font-size: 0.8rem; margin-left: 0.25rem;" onclick="cancelJob('{{ job.id }}', this)">
+              Cancel
+            </button>
+            {% endif %}
           </td>
         </tr>
         {% endfor %}
@@ -71,4 +78,24 @@
   </div>
   {% endif %}
 </div>
+
+<script>
+  async function cancelJob(jobId, button) {
+    if (button) button.disabled = true;
+    try {
+      const resp = await fetch(`/api/jobs/${jobId}/cancel`, { method: 'POST' });
+      const data = await resp.json();
+      if (!resp.ok) {
+        showToast({ type: 'error', title: 'Cancel failed', message: data.error || 'Unable to cancel job' });
+        if (button) button.disabled = false;
+        return;
+      }
+      showToast({ type: 'warning', title: 'Cancellation requested', message: 'Job cancellation is being processed.' });
+      setTimeout(() => window.location.reload(), 1500);
+    } catch (e) {
+      showToast({ type: 'error', title: 'Cancel failed', message: 'Unable to reach cancel endpoint.' });
+      if (button) button.disabled = false;
+    }
+  }
+</script>
 {% endblock %}
