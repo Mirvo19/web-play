@@ -11,6 +11,32 @@ from app.worker.deleter import execute_video_deletion
 _worker_thread = None
 _stop_event = threading.Event()
 
+
+def _execute_job(app: Flask, job_id: str):
+    with app.app_context():
+        job = Job.query.get(job_id)
+        if not job:
+            return
+
+        if job.status == 'queued':
+            job.status = 'processing'
+            job.started_at = datetime.now(timezone.utc)
+            job.current_step = 'Processing'
+            job.current_message = 'Job picked up by worker'
+            db.session.commit()
+
+        if job.job_type == 'transcode_and_upload':
+            execute_video_pipeline(job_id)
+        elif job.job_type == 'delete_video':
+            execute_video_deletion(job_id)
+
+
+def start_job_thread(app: Flask, job_id: str):
+    thread = threading.Thread(target=_execute_job, args=(app, job_id), daemon=True)
+    thread.start()
+    return thread
+
+
 def cleanup_orphan_workspaces(app: Flask):
     upload_folder = app.config.get('UPLOAD_FOLDER', '/tmp/video-processing')
     if not os.path.exists(upload_folder):
@@ -57,16 +83,12 @@ def worker_loop(app: Flask):
                 if running_jobs < max_concurrent:
                     job = Job.query.filter_by(status='queued').order_by(Job.created_at.asc()).first()
                     if job:
-                        # Diagnostic logging to help trace why jobs may not be picked up
                         try:
                             if app.config.get('LOG_TO_STDOUT', False):
                                 print(f"[WORKER] Picking job {job.id} type={job.job_type} (created at {job.created_at})")
                         except Exception:
                             pass
-                        if job.job_type == 'transcode_and_upload':
-                            execute_video_pipeline(job.id)
-                        elif job.job_type == 'delete_video':
-                            execute_video_deletion(job.id)
+                        start_job_thread(app, job.id)
         except Exception as e:
             try:
                 if app.config.get('LOG_TO_STDOUT', False):

@@ -205,7 +205,7 @@
         <div style="font-size: 0.78rem; color: var(--color-muted); text-transform: uppercase;">Engine Capacity</div>
         <div style="font-family: var(--font-mono); font-size: 0.88rem; margin-top: 0.4rem; color: var(--color-text);">
           Worker Threads: <strong id="cfgThreads">40</strong><br>
-          Max Concurrent: <strong id="cfgConcurrent">1</strong>
+          Active / Max: <strong id="cfgActiveSlots">0</strong>/<strong id="cfgConcurrent">1</strong>
         </div>
       </div>
     </div>
@@ -663,29 +663,41 @@
       // 6. Application Worker & Queue Stats
       const player = data.player || {};
       const activeJob = player.active_job || data.active_job;
+      const activeJobs = Array.isArray(player.active_jobs) ? player.active_jobs : (activeJob ? [activeJob] : []);
       const jobDiv = document.getElementById('activeJobStatus');
       const activeJobBadge = document.getElementById('activeJobBadge');
+      const ffmpegCfg = player.ffmpeg_config || {};
+      const activeCount = activeJobs.length;
+      const maxConcurrent = parseInt(ffmpegCfg.max_concurrent_jobs || '1', 10) || 1;
 
-      if (activeJob) {
-        activeJobBadge.textContent = 'Processing';
+      if (activeJobs.length > 0) {
+        activeJobBadge.textContent = `Running ${activeCount}/${maxConcurrent}`;
         activeJobBadge.className = 'badge badge-warning';
-        
-        const videoTitle = activeJob.video_title ? `<div style="font-size: 0.85rem; color: var(--color-accent); font-weight: 600; margin-bottom: 0.2rem;">Video: ${activeJob.video_title}</div>` : '';
-        const elapsed = activeJob.elapsed_seconds ? ` • Elapsed: ${activeJob.elapsed_seconds}s` : '';
+
+        const cards = activeJobs.map(job => {
+          const videoTitle = job.video_title ? `<div style="font-size: 0.85rem; color: var(--color-accent); font-weight: 600; margin-bottom: 0.2rem;">Video: ${job.video_title}</div>` : '';
+          const elapsed = job.elapsed_seconds ? ` • Elapsed: ${job.elapsed_seconds}s` : '';
+          return `
+            <div style="padding: 0.8rem; border: 1px solid var(--color-border); border-radius: var(--radius-md); background-color: var(--bg-surface); margin-bottom: 0.7rem;">
+              ${videoTitle}
+              <div style="margin-bottom: 0.6rem;">
+                <div style="font-weight: 600; font-size: 0.95rem;">${job.current_step || 'Processing'}</div>
+                <div style="font-size: 0.82rem; color: var(--color-muted); margin-top: 0.2rem;">${job.current_message || ''}</div>
+              </div>
+              <div class="progress-bar-container" style="height: 10px; margin-bottom: 0.6rem;">
+                <div class="progress-bar-fill" style="width: ${job.progress || 0}%;"></div>
+              </div>
+              <div style="font-family: var(--font-mono); font-size: 0.8rem; display: flex; justify-content: space-between; gap: 0.5rem;">
+                <span>Progress: ${(job.progress || 0).toFixed(1)}%${elapsed}</span>
+                <span>Type: ${job.job_type || 'transcode'}</span>
+              </div>
+            </div>
+          `;
+        }).join('');
 
         jobDiv.innerHTML = `
-          ${videoTitle}
-          <div style="margin-bottom: 0.75rem;">
-            <div style="font-weight: 600; font-size: 0.95rem;">${activeJob.current_step || 'Processing'}</div>
-            <div style="font-size: 0.82rem; color: var(--color-muted); margin-top: 0.2rem;">${activeJob.current_message || ''}</div>
-          </div>
-          <div class="progress-bar-container" style="height: 10px; margin-bottom: 0.75rem;">
-            <div class="progress-bar-fill" style="width: ${activeJob.progress || 0}%;"></div>
-          </div>
-          <div style="font-family: var(--font-mono); font-size: 0.8rem; background-color: var(--bg-input); padding: 0.6rem; border-radius: var(--radius-sm); border: 1px solid var(--color-border); display: flex; justify-content: space-between;">
-            <span>Progress: ${(activeJob.progress || 0).toFixed(1)}%${elapsed}</span>
-            <span>Type: ${activeJob.job_type || 'transcode'}</span>
-          </div>
+          <div style="font-size: 0.8rem; color: var(--color-muted); margin-bottom: 0.7rem;">Active slots: ${activeCount}/${maxConcurrent}</div>
+          ${cards}
         `;
       } else {
         activeJobBadge.textContent = 'Idle';
@@ -701,9 +713,9 @@
       document.getElementById('cntFailed').textContent = `Failed: ${jobs.failed || 0}`;
 
       // Config Threads
-      const ffmpegCfg = player.ffmpeg_config || {};
       document.getElementById('cfgThreads').textContent = ffmpegCfg.ffmpeg_threads || '40';
       document.getElementById('ffmpegThreadsText').textContent = `${ffmpegCfg.ffmpeg_threads || '40'} threads`;
+      document.getElementById('cfgActiveSlots').textContent = activeCount;
       document.getElementById('cfgConcurrent').textContent = ffmpegCfg.max_concurrent_jobs || '1';
 
       // Asset Counters

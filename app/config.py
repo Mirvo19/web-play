@@ -34,7 +34,7 @@ class Config:
     MAX_CONTENT_LENGTH = 16 * 1024 * 1024 * 1024  # 16 GB max streaming payload
     HLS_SEGMENT_DURATION = int(os.environ.get('HLS_SEGMENT_DURATION', 6))
     DEFAULT_FFMPEG_THREADS = int(os.environ.get('DEFAULT_FFMPEG_THREADS', 40))
-    MAX_CONCURRENT_JOBS = int(os.environ.get('MAX_CONCURRENT_JOBS', 1))
+    MAX_CONCURRENT_JOBS = int(os.environ.get('MAX_CONCURRENT_JOBS', 2))
     # Whether to also echo job logs and upload events to stdout (for local debugging)
     LOG_TO_STDOUT = os.environ.get('LOG_TO_STDOUT', 'false').lower() in ('1', 'true', 'yes')
 

@@ -547,15 +547,20 @@ def get_system_stats():
     failed_jobs_count = Job.query.filter_by(status='failed').count()
     total_jobs_count = Job.query.count()
 
-    active_job = Job.query.filter_by(status='processing').order_by(Job.started_at.desc()).first()
+    active_jobs = Job.query.filter_by(status='processing').order_by(Job.started_at.desc()).all()
     active_job_data = None
-    if active_job:
-        active_job_data = active_job.to_dict(include_logs=False)
+    active_jobs_data = []
+    for active_job in active_jobs:
+        job_data = active_job.to_dict(include_logs=False)
         if active_job.video:
-            active_job_data['video_title'] = active_job.video.title
+            job_data['video_title'] = active_job.video.title
         if active_job.started_at:
             started_ts = active_job.started_at.timestamp()
-            active_job_data['elapsed_seconds'] = round(max(0, now_ts - started_ts), 1)
+            job_data['elapsed_seconds'] = round(max(0, now_ts - started_ts), 1)
+        active_jobs_data.append(job_data)
+
+    if active_jobs_data:
+        active_job_data = active_jobs_data[0]
 
     # Settings
     ffmpeg_threads = Setting.get('ffmpeg_threads', str(current_app.config.get('DEFAULT_FFMPEG_THREADS', 40)))
@@ -641,6 +646,7 @@ def get_system_stats():
                 'total': total_jobs_count
             },
             'active_job': active_job_data,
+            'active_jobs': active_jobs_data,
             'ffmpeg_config': {
                 'ffmpeg_threads': ffmpeg_threads,
                 'max_concurrent_jobs': max_concurrent,
