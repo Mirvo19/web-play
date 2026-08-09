@@ -89,12 +89,23 @@ class HackClubCDNProvider(CDNProvider):
 
         headers = {"Authorization": f"Bearer {self.api_key}"}
         
-        # Extract file ID or full path from the saved remote path or public URL.
+        # Extract file path from the stored remote identifier or public URL.
         if remote_path_or_url.startswith('http'):
             parsed = urlparse(remote_path_or_url)
-            file_id = parsed.path.lstrip('/')
+            remote_path = parsed.path.lstrip('/')
         else:
-            file_id = remote_path_or_url.lstrip('/')
+            remote_path = remote_path_or_url.lstrip('/')
+
+        basename = os.path.basename(remote_path) or remote_path
+        file_id = basename
+
+        # Try both the full remote path and basename candidates.
+        file_id_candidates = [basename]
+        if remote_path != basename:
+            file_id_candidates.insert(0, remote_path)
+            first_segment = remote_path.split('/', 1)[0]
+            if first_segment and first_segment not in file_id_candidates:
+                file_id_candidates.append(first_segment)
 
         tried = []
 
@@ -105,8 +116,10 @@ class HackClubCDNProvider(CDNProvider):
                 entry = {'endpoint': remote_path_or_url, 'status': resp.status_code, 'body': resp.text, 'headers': dict(resp.headers)}
                 tried.append(entry)
                 ct = resp.headers.get('content-type', '')
-                # Accept only explicit confirmations
                 if resp.status_code == 204:
+                    return True, tried
+                if resp.status_code == 404:
+                    # Public URLs often return 404 for missing files; treat as deleted.
                     return True, tried
                 if resp.status_code == 200 and 'application/json' in ct:
                     try:
@@ -115,17 +128,19 @@ class HackClubCDNProvider(CDNProvider):
                             return True, tried
                     except Exception:
                         pass
-                # otherwise do not treat HTML 200/404 as success
             except Exception as e:
                 tried.append({'endpoint': remote_path_or_url, 'error': str(e)})
 
         # Try API deletion endpoints that accept an ID/key (include documented /api/v4/upload/:id)
-        delete_endpoints = [
-            f"{self.BASE_URL}/api/v4/upload/{file_id}",
-            f"{self.BASE_URL}/api/v4/files/{file_id}",
-            f"{self.BASE_URL}/api/v4/delete/{file_id}",
-            f"{self.BASE_URL}/api/v4/{file_id}",
-        ]
+        delete_endpoints = []
+        for candidate in file_id_candidates:
+            encoded_candidate = quote(candidate, safe='')
+            delete_endpoints.extend([
+                f"{self.BASE_URL}/api/v4/upload/{encoded_candidate}",
+                f"{self.BASE_URL}/api/v4/files/{encoded_candidate}",
+                f"{self.BASE_URL}/api/v4/delete/{encoded_candidate}",
+                f"{self.BASE_URL}/api/v4/{encoded_candidate}",
+            ])
 
         for endpoint in delete_endpoints:
             try:

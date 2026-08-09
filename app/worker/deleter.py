@@ -62,8 +62,8 @@ def execute_video_deletion(job_id: str):
 
     for idx, f in enumerate(files):
         if cdn_provider:
-            # Prefer remote_url when available (more likely to be directly deletable)
-            identifier = f.remote_url or f.remote_path
+            # Prefer the provider's stored remote identifier, then the public URL.
+            identifier = f.remote_path or f.remote_url
             try:
                 log_delete_job(job_id, f"Attempting delete for {identifier}")
                 result = cdn_provider.delete_file(identifier)
