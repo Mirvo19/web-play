@@ -497,6 +497,10 @@ def execute_video_pipeline(job_id: str):
                 update_job_progress(job_id, f"Uploading to CDN — playlist {target['label']}", 55.0 + (30.0 * (bytes_uploaded / max(1, total_bytes_to_upload))))
                 res = cdn_provider.upload_file(p_path, remote_name)
                 v_record.playlist_url = res['url']
+                # Record the uploaded variant playlist URL so we can reference
+                # absolute CDN URLs from the master playlist (avoids broken
+                # relative paths on providers that return flat IDs/URLs)
+                variant_master_urls[target['label']] = res['url']
                 v_file = VideoFile(
                     video_id=video.id,
                     video_variant_id=v_record.id,
@@ -514,6 +518,23 @@ def execute_video_pipeline(job_id: str):
         # Step 7: Upload Master Playlist
         if controller.should_cancel():
             raise JobCancelled()
+        # Rebuild master playlist to reference absolute CDN URLs for each
+        # variant playlist (some CDN providers return non-hierarchical URLs,
+        # so the original relative paths would 404).
+        try:
+            with open(master_playlist_path, 'w') as f_master:
+                f_master.write("#EXTM3U\n#EXT-X-VERSION:3\n\n")
+                for target, v_dir, playlist_file in variant_dirs:
+                    bandwidth = int(target['height'] * target['width'] * 3.5 * meta['fps'])
+                    f_master.write(f"#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},RESOLUTION={target['width']}x{target['height']},NAME=\"{target['label']}\"\n")
+                    url = variant_master_urls.get(target['label'])
+                    if url:
+                        f_master.write(f"{url}\n\n")
+                    else:
+                        f_master.write(f"{target['label']}/playlist.m3u8\n\n")
+        except Exception:
+            # If rewriting fails, proceed with existing master (best-effort)
+            pass
         master_res = cdn_provider.upload_file(master_playlist_path, f"{video.id}/master.m3u8")
         master_v_file = VideoFile(
             video_id=video.id,
