@@ -317,7 +317,25 @@
   </div>
 </div>
 
+<!-- GitHub Repository: Latest Commit -->
+<div class="clay-card" style="margin-top: 1.5rem;">
+  <div class="clay-card-header">
+    <div style="display: flex; align-items: center; gap: 0.6rem;">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path>
+      </svg>
+      <h3 class="clay-card-title">Mirvo19/web-play — Latest Commit</h3>
+    </div>
+    <a href="https://github.com/Mirvo19/web-play/commits/main" target="_blank" rel="noopener" class="badge badge-info" style="font-size: 0.75rem; text-decoration: none;">View on GitHub ↗</a>
+  </div>
+
+  <div id="ghCommitBody">
+    <div style="color: var(--color-muted); font-size: 0.85rem; font-family: var(--font-mono);">Fetching commit info...</div>
+  </div>
+</div>
+
 {% endblock %}
+
 
 {% block scripts %}
 <script>
@@ -783,6 +801,61 @@
   initCoreGrid(48); // default placeholder until API returns exact core count
   fetchServerStats();
   setInterval(fetchServerStats, 1500);
+
+  // ── GitHub Latest Commit Widget ────────────────────────────────────────────
+  async function fetchGitHubCommit() {
+    const container = document.getElementById('ghCommitBody');
+    if (!container) return;
+    try {
+      const resp = await fetch('https://api.github.com/repos/Mirvo19/web-play/commits?per_page=1', {
+        headers: { 'Accept': 'application/vnd.github.v3+json' }
+      });
+      if (!resp.ok) {
+        const remaining = resp.headers.get('X-RateLimit-Remaining');
+        container.innerHTML = `<div style="color: var(--color-danger); font-size: 0.82rem; font-family: var(--font-mono);">GitHub API error ${resp.status}${remaining === '0' ? ' — rate limit reached' : ''}.</div>`;
+        return;
+      }
+      const commits = await resp.json();
+      if (!Array.isArray(commits) || commits.length === 0) {
+        container.innerHTML = `<div style="color: var(--color-muted); font-size: 0.82rem;">No commits found.</div>`;
+        return;
+      }
+      const c = commits[0];
+      const sha = c.sha ? c.sha.slice(0, 7) : '?';
+      const shaFull = c.sha || '';
+      const msg = (c.commit?.message || '').split('\n')[0];   // first line only
+      const author = c.commit?.author?.name || c.author?.login || 'Unknown';
+      const dateStr = c.commit?.author?.date;
+      const dateFormatted = dateStr ? new Date(dateStr).toLocaleString() : '—';
+      const commitUrl = c.html_url || `https://github.com/Mirvo19/web-play/commit/${shaFull}`;
+
+      container.innerHTML = `
+        <div style="display: flex; align-items: flex-start; gap: 1.25rem; flex-wrap: wrap;">
+          <a href="${commitUrl}" target="_blank" rel="noopener" style="text-decoration: none; flex-shrink: 0;">
+            <code style="font-family: var(--font-mono); font-size: 0.95rem; font-weight: 700;
+                         background-color: var(--bg-surface); border: 1px solid var(--color-border);
+                         padding: 0.3rem 0.6rem; border-radius: var(--radius-sm);
+                         color: var(--color-accent); letter-spacing: 0.5px;">${sha}</code>
+          </a>
+          <div style="flex: 1; min-width: 200px;">
+            <div style="font-weight: 600; color: var(--color-text); font-size: 0.92rem; margin-bottom: 0.25rem; word-break: break-word;">${msg}</div>
+            <div style="font-size: 0.78rem; color: var(--color-muted); font-family: var(--font-mono);">
+              <span style="color: var(--color-success);">@${author}</span>
+              <span style="margin: 0 0.4rem;">·</span>
+              <span>${dateFormatted}</span>
+            </div>
+          </div>
+        </div>
+      `;
+    } catch (e) {
+      const container = document.getElementById('ghCommitBody');
+      if (container) container.innerHTML = `<div style="color: var(--color-muted); font-size: 0.82rem; font-family: var(--font-mono);">Could not reach GitHub API.</div>`;
+    }
+  }
+
+  fetchGitHubCommit();
+  setInterval(fetchGitHubCommit, 5 * 60 * 1000); // refresh every 5 minutes
+
 </script>
 {% endblock %}
 

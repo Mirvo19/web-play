@@ -6,10 +6,11 @@ from app.worker import background
 
 
 class DummyJob:
-    def __init__(self, job_id, job_type='transcode_and_upload'):
+    def __init__(self, job_id, job_type='transcode_and_upload', video_id='video-1', status='queued'):
         self.id = job_id
         self.job_type = job_type
-        self.status = 'queued'
+        self.video_id = video_id
+        self.status = status
         self.current_step = 'Queued'
         self.current_message = 'Queued'
 
@@ -29,6 +30,12 @@ class BackgroundWorkerTests(unittest.TestCase):
 
             self.assertFalse(thread.is_alive())
             self.assertTrue(mock_execute.called)
+
+    def test_has_active_job_for_video_detects_duplicate_upload_jobs(self):
+        queued_job = DummyJob('job-2', status='queued')
+        active_jobs = [DummyJob('job-1', status='processing')]
+
+        self.assertTrue(background.has_active_job_for_video(queued_job, active_jobs))
 
 
 if __name__ == '__main__':

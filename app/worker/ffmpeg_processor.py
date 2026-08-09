@@ -22,24 +22,34 @@ def inspect_video(file_path: str, ffprobe_bin: str = None) -> Dict[str, Any]:
     if not ffprobe_bin:
         raise RuntimeError('FFprobe executable not found. Please install ffprobe or set full path in FFMPEG_BIN/FFPROBE_BIN environment variables.')
 
+    if not os.path.exists(file_path):
+        raise RuntimeError(f"Source file not found at expected path: {file_path!r}. The upload may have failed or the file was written to a different location.")
+    if os.path.getsize(file_path) == 0:
+        raise RuntimeError(f"Source file is empty (0 bytes): {file_path!r}. The upload may have been interrupted.")
+
     cmd = [
         ffprobe_bin,
-        '-v', 'quiet',
+        '-v', 'error',          # capture actual error messages in stderr (not 'quiet' which silences them)
         '-print_format', 'json',
         '-show_format',
         '-show_streams',
         file_path
     ]
     try:
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
     except FileNotFoundError as exc:
         raise RuntimeError(f"FFprobe executable not found at path: {ffprobe_bin}") from exc
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"ffprobe timed out after 60 seconds inspecting: {file_path!r}")
 
     stderr = (result.stderr or '').strip()
     stdout = (result.stdout or '').strip()
     if result.returncode != 0:
-        details = stderr or stdout or 'No output was produced by ffprobe.'
+        details = stderr or stdout or f'ffprobe exited with code {result.returncode} and produced no output.'
         raise RuntimeError(f"ffprobe failed (rc={result.returncode}): {details}")
+    if not stdout:
+        details = stderr or f'ffprobe produced no output (rc={result.returncode}).'
+        raise RuntimeError(f"ffprobe returned empty output: {details}")
 
     try:
         probe_data = json.loads(result.stdout)

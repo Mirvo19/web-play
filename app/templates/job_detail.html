@@ -60,29 +60,64 @@
     }
   }
 
-  setInterval(async () => {
+  let _lastLogTimestamp = null;
+  let _accumulatedLogs = [];
+  let _jobDone = false;
+
+  // Append only NEW log lines from the API using the `since` query param
+  async function pollJobLogs() {
+    if (_jobDone) return;
     try {
-      const resp = await fetch(logsUrl);
+      const url = _lastLogTimestamp
+        ? `${logsUrl}?since=${encodeURIComponent(_lastLogTimestamp)}`
+        : logsUrl;
+      const resp = await fetch(url);
       if (!resp.ok) return;
       const data = await resp.json();
-      const logs = data.logs;
+      const newLogs = data.logs;
       const job = data.job;
-      const logBox = document.getElementById('jobDetailLogBox');
-      logBox.textContent = logs.map(l => l.message).join('\n');
 
-      if(job.status === 'processing'){
-        if(!_jobDetailToastId) _jobDetailToastId = showProgressToast({ title: 'Job running', message: job.current_step || 'Processing...', autoDismiss: false });
-        updateToastProgress(_jobDetailToastId, Math.round(job.progress||0), job.current_step || 'Processing...');
-      } else if(job.status === 'completed'){
-        showToast({ type: 'success', title: 'Job completed', message: 'Job finished successfully' });
-        if(_jobDetailToastId) closeToast(_jobDetailToastId);
-        _jobDetailToastId = null;
-      } else if(job.status === 'failed'){
-        showToast({ type: 'error', title: 'Job failed', message: job.error_message || 'Job failed' });
-        if(_jobDetailToastId) closeToast(_jobDetailToastId);
-        _jobDetailToastId = null;
+      // Accumulate new log messages
+      if (newLogs && newLogs.length > 0) {
+        _accumulatedLogs.push(...newLogs.map(l => l.message));
+        _lastLogTimestamp = newLogs[newLogs.length - 1].timestamp;
+        const logBox = document.getElementById('jobDetailLogBox');
+        logBox.textContent = _accumulatedLogs.join('\n');
+        logBox.scrollTop = logBox.scrollHeight;
+      }
+
+      // Update progress bar
+      if (job) {
+        const progressBar = document.querySelector('.progress-bar-fill');
+        const stepLabel = document.querySelector('.progress-bar-container').previousElementSibling?.querySelector('span:first-child');
+        const pctLabel = document.querySelector('.progress-bar-container').previousElementSibling?.querySelector('span:last-child');
+        if (progressBar) progressBar.style.width = `${job.progress || 0}%`;
+        if (stepLabel) stepLabel.textContent = job.current_step || '';
+        if (pctLabel) pctLabel.textContent = `${Math.round(job.progress || 0)}%`;
+
+        if (job.status === 'processing') {
+          if (!_jobDetailToastId) _jobDetailToastId = showProgressToast({ title: 'Job running', message: job.current_step || 'Processing...', autoDismiss: false });
+          updateToastProgress(_jobDetailToastId, Math.round(job.progress || 0), job.current_step || 'Processing...');
+        } else if (job.status === 'completed') {
+          _jobDone = true;
+          showToast({ type: 'success', title: 'Job completed', message: 'Job finished successfully' });
+          if (_jobDetailToastId) closeToast(_jobDetailToastId);
+          _jobDetailToastId = null;
+        } else if (job.status === 'failed') {
+          _jobDone = true;
+          showToast({ type: 'error', title: 'Job failed', message: job.error_message || 'Job failed' });
+          if (_jobDetailToastId) closeToast(_jobDetailToastId);
+          _jobDetailToastId = null;
+        } else if (job.status === 'cancelled') {
+          _jobDone = true;
+          if (_jobDetailToastId) closeToast(_jobDetailToastId);
+          _jobDetailToastId = null;
+        }
       }
     } catch (e) {}
-  }, 2000);
+  }
+
+  setInterval(pollJobLogs, 2000);
+
 </script>
 {% endblock %}
