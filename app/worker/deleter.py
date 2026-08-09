@@ -95,10 +95,10 @@ def execute_video_deletion(job_id: str):
     log_delete_job(job_id, "✓ Thumbnail deleted")
     log_delete_job(job_id, "✓ Database metadata removing")
 
-    # Remove database records
+    # Mark video as deleted but keep DB records so job history/logs remain visible
     video.status = 'deleted'
-    db.session.delete(video)
-    
+    db.session.add(video)
+
     job.status = 'completed'
     job.progress = 100.0
     job.current_step = 'Complete'
