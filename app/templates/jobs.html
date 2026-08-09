@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+
+{% block title %}Active Jobs — Video Infrastructure Platform{% endblock %}
+{% block header_title %}Transcoding & Deletion Jobs{% endblock %}
+
+{% block content %}
+<div class="clay-card">
+  <div class="clay-card-header">
+    <h3 class="clay-card-title">Job Execution Queue</h3>
+  </div>
+
+  {% if jobs %}
+  <div class="table-container">
+    <table class="clay-table">
+      <thead>
+        <tr>
+          <th>Job ID</th>
+          <th>Type</th>
+          <th>Progress</th>
+          <th>Current Step</th>
+          <th>Status</th>
+          <th>Started</th>
+          <th style="text-align: right;">Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for job in jobs %}
+        <tr>
+          <td style="font-family: var(--font-mono); font-size: 0.8rem;">{{ job.id[:8] }}...</td>
+          <td style="font-weight: 600;">
+            {% if job.job_type == 'transcode_and_upload' %}
+              Transcode & CDN Upload
+            {% else %}
+              Video Deletion
+            {% endif %}
+          </td>
+          <td style="width: 180px;">
+            <div style="font-size: 0.8rem; font-weight: 600; margin-bottom: 0.2rem;">{{ round(job.progress, 1) }}%</div>
+            <div class="progress-bar-container">
+              <div class="progress-bar-fill" style="width: {{ job.progress }}%;"></div>
+            </div>
+          </td>
+          <td style="font-size: 0.85rem; color: var(--color-muted);">{{ job.current_step }}</td>
+          <td>
+            {% if job.status == 'completed' %}
+              <span class="badge badge-success">Completed</span>
+            {% elif job.status == 'processing' %}
+              <span class="badge badge-warning">Processing</span>
+            {% elif job.status == 'queued' %}
+              <span class="badge badge-info">Queued</span>
+            {% else %}
+              <span class="badge badge-danger">Failed</span>
+            {% endif %}
+          </td>
+          <td style="font-size: 0.8rem; color: var(--color-muted);">
+            {{ job.created_at.strftime('%H:%M:%S') if job.created_at else '' }}
+          </td>
+          <td style="text-align: right;">
+            <a href="{{ url_for('views.job_detail', job_id=job.id) }}" class="btn" style="padding: 0.35rem 0.7rem; font-size: 0.8rem;">
+              View Logs
+            </a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div style="text-align: center; padding: 2rem; color: var(--color-muted);">
+    No background processing jobs recorded yet.
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

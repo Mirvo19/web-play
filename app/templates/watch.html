@@ -1,0 +1,278 @@
+{% extends "base.html" %}
+
+{% block title %}{{ video.title }} — Watch Video{% endblock %}
+{% block header_title %}{{ video.title }}{% endblock %}
+
+{% block content %}
+<style>
+  .video-container {
+    position: relative;
+    width: 100%;
+    background-color: #000000;
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    box-shadow: var(--shadow-raised);
+    border: 1px solid var(--color-border);
+  }
+
+  video {
+    width: 100%;
+    max-height: 72vh;
+    display: block;
+  }
+
+  .custom-controls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem 1.25rem;
+    background-color: var(--bg-card);
+    border-top: 1px solid var(--color-border);
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+
+  .control-group {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .seek-bar {
+    flex: 1;
+    height: 6px;
+    background-color: var(--bg-input);
+    border-radius: 3px;
+    cursor: pointer;
+    position: relative;
+    box-shadow: var(--shadow-inset);
+  }
+
+  .seek-fill {
+    height: 100%;
+    background-color: var(--color-accent);
+    border-radius: 3px;
+    width: 0%;
+  }
+
+  .control-btn {
+    background: none;
+    border: none;
+    color: var(--color-text);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    padding: 0.4rem;
+    border-radius: var(--radius-sm);
+    transition: background-color 0.15s ease;
+  }
+
+  .control-btn:hover {
+    background-color: var(--bg-surface);
+  }
+</style>
+
+<div style="max-width: 1100px; margin: 0 auto;">
+  <!-- Video Player Card -->
+  <div class="video-container">
+    <video id="videoPlayer" poster="{{ video.thumbnail_url or '' }}" playsinline></video>
+
+    <!-- Custom Control Bar -->
+    <div class="custom-controls">
+      <div class="control-group">
+        <button id="playBtn" class="control-btn" title="Play/Pause (Space)">
+          <svg id="playIcon" width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+          <svg id="pauseIcon" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" style="display: none;"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>
+        </button>
+
+        <span id="timeDisplay" style="font-family: var(--font-mono); font-size: 0.82rem; color: var(--color-muted);">00:00 / 00:00</span>
+      </div>
+
+      <!-- Seek Timeline Bar -->
+      <div class="seek-bar" id="seekBar">
+        <div class="seek-fill" id="seekFill"></div>
+      </div>
+
+      <div class="control-group">
+        <!-- Volume Control -->
+        <button id="muteBtn" class="control-btn" title="Mute/Unmute">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>
+        </button>
+
+        <!-- Speed Selector -->
+        <select id="speedSelect" class="form-select" style="padding: 0.25rem 0.5rem; font-size: 0.8rem; width: auto;">
+          <option value="0.5">0.5x</option>
+          <option value="1.0" selected>1.0x</option>
+          <option value="1.25">1.25x</option>
+          <option value="1.5">1.5x</option>
+          <option value="2.0">2.0x</option>
+        </select>
+
+        <!-- Manual Quality Selector (No Auto-Switching!) -->
+        <div style="display: flex; align-items: center; gap: 0.3rem;">
+          <span style="font-size: 0.8rem; color: var(--color-muted);">⚙</span>
+          <select id="qualitySelect" class="form-select" style="padding: 0.25rem 0.5rem; font-size: 0.8rem; width: auto;" title="Manual Quality Selector">
+            <option value="-1">Loading levels...</option>
+          </select>
+        </div>
+
+        <!-- Fullscreen Button -->
+        <button id="fullscreenBtn" class="control-btn" title="Toggle Fullscreen (F)">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"></path></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Video Info Metadata -->
+  <div class="clay-card" style="margin-top: 1.5rem;">
+    <h2 style="font-size: 1.4rem; font-weight: 700; margin-bottom: 0.5rem;">{{ video.title }}</h2>
+    
+    <div style="display: flex; gap: 1rem; align-items: center; margin-bottom: 1rem; color: var(--color-muted); font-size: 0.85rem;">
+      <span class="badge badge-info">{{ video.source_height }}p Original</span>
+      <span>CDN: {{ video.cdn_account.name if video.cdn_account else 'Hack Club CDN' }}</span>
+      <span>Uploaded: {{ video.created_at.strftime('%Y-%m-%d') if video.created_at else '' }}</span>
+    </div>
+
+    {% if video.description %}
+      <p style="color: var(--color-text); font-size: 0.92rem; line-height: 1.6;">{{ video.description }}</p>
+    {% endif %}
+  </div>
+</div>
+
+<script>
+  const video = document.getElementById('videoPlayer');
+  const playBtn = document.getElementById('playBtn');
+  const playIcon = document.getElementById('playIcon');
+  const pauseIcon = document.getElementById('pauseIcon');
+  const seekBar = document.getElementById('seekBar');
+  const seekFill = document.getElementById('seekFill');
+  const timeDisplay = document.getElementById('timeDisplay');
+  const speedSelect = document.getElementById('speedSelect');
+  const qualitySelect = document.getElementById('qualitySelect');
+  const fullscreenBtn = document.getElementById('fullscreenBtn');
+
+  const masterUrl = "{{ video.master_playlist_url }}";
+  let hls = null;
+
+  function formatTime(seconds) {
+    if (isNaN(seconds) || seconds < 0) return "00:00";
+    const m = Math.floor(seconds / 60);
+    const s = Math.floor(seconds % 60);
+    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  }
+
+  // Initialize HLS.js with AUTO-BITRATE SWITCHING DISABLED!
+  if (Hls.isSupported() && masterUrl) {
+    hls = new Hls({
+      autoStartLoad: true,
+      capLevelToPlayerSize: false,  // Disable automatic size capping
+      startLevel: -1               // Start highest level
+    });
+
+    hls.loadSource(masterUrl);
+    hls.attachMedia(video);
+
+    hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
+      qualitySelect.innerHTML = '';
+      
+      // Populate manual quality dropdown (No auto-switching option!)
+      data.levels.forEach((level, index) => {
+        const option = document.createElement('option');
+        option.value = index;
+        const resLabel = level.name || `${level.height}p`;
+        option.textContent = `${resLabel} (${Math.round(level.bitrate / 1000)} kbps)`;
+        qualitySelect.appendChild(option);
+      });
+
+      // Default select highest level (Original resolution) and LOCK it
+      if (data.levels.length > 0) {
+        const topLevelIndex = data.levels.length - 1;
+        qualitySelect.value = topLevelIndex;
+        hls.currentLevel = topLevelIndex; // Lock quality level!
+      }
+    });
+
+    // Handle Manual Quality Switch by User
+    qualitySelect.addEventListener('change', () => {
+      const selectedIndex = parseInt(qualitySelect.value);
+      if (hls && selectedIndex >= 0) {
+        const currentTime = video.currentTime;
+        const isPlaying = !video.paused;
+
+        // Force manual level locking (disable automatic ABR)
+        hls.currentLevel = selectedIndex;
+
+        if (isPlaying) video.play();
+      }
+    });
+
+  } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+    // Native HLS support (Safari)
+    video.src = masterUrl;
+  }
+
+  // Play / Pause Toggle
+  function togglePlay() {
+    if (video.paused) {
+      video.play();
+      playIcon.style.display = 'none';
+      pauseIcon.style.display = 'block';
+    } else {
+      video.pause();
+      playIcon.style.display = 'block';
+      pauseIcon.style.display = 'none';
+    }
+  }
+
+  playBtn.addEventListener('click', togglePlay);
+  video.addEventListener('click', togglePlay);
+
+  // Time & Progress Updates
+  video.addEventListener('timeupdate', () => {
+    if (video.duration) {
+      const pct = (video.currentTime / video.duration) * 100;
+      seekFill.style.width = `${pct}%`;
+      timeDisplay.textContent = `${formatTime(video.currentTime)} / ${formatTime(video.duration)}`;
+    }
+  });
+
+  // Seek bar click
+  seekBar.addEventListener('click', (e) => {
+    const rect = seekBar.getBoundingClientRect();
+    const pos = (e.clientX - rect.left) / rect.width;
+    if (video.duration) {
+      video.currentTime = pos * video.duration;
+    }
+  });
+
+  // Speed selector
+  speedSelect.addEventListener('change', () => {
+    video.playbackRate = parseFloat(speedSelect.value);
+  });
+
+  // Fullscreen
+  fullscreenBtn.addEventListener('click', () => {
+    if (!document.fullscreenElement) {
+      video.requestFullscreen().catch(err => {});
+    } else {
+      document.exitFullscreen();
+    }
+  });
+
+  // Keyboard Shortcuts
+  document.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+    if (e.code === 'Space') {
+      e.preventDefault();
+      togglePlay();
+    } else if (e.code === 'ArrowRight') {
+      video.currentTime = Math.min(video.duration, video.currentTime + 5);
+    } else if (e.code === 'ArrowLeft') {
+      video.currentTime = Math.max(0, video.currentTime - 5);
+    } else if (e.code === 'KeyF') {
+      fullscreenBtn.click();
+    }
+  });
+</script>
+{% endblock %}

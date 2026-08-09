@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Login — Video Hosting Platform</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/claymorphism.css') }}">
+  <style>
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      background-color: var(--bg-main);
+    }
+    .login-card {
+      width: 100%;
+      max-width: 420px;
+      padding: 2.5rem;
+    }
+    .login-header {
+      text-align: center;
+      margin-bottom: 2rem;
+    }
+    .login-brand {
+      font-size: 1.3rem;
+      font-weight: 700;
+      color: var(--color-text);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.6rem;
+      margin-bottom: 0.5rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="clay-card login-card">
+    <div class="login-header">
+      <div class="login-brand">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polygon points="23 7 16 12 23 17 23 7"></polygon>
+          <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
+        </svg>
+        <span>HC STREAM</span>
+      </div>
+      <p style="color: var(--color-muted); font-size: 0.88rem;">Video Infrastructure Dashboard</p>
+    </div>
+
+    <div id="errorAlert" class="badge badge-danger" style="display: none; width: 100%; padding: 0.75rem; margin-bottom: 1.25rem; justify-content: center;"></div>
+
+    <form id="loginForm">
+      <div class="form-group">
+        <label class="form-label" for="email">Supabase User Email</label>
+        <input type="email" id="email" class="form-control" placeholder="admin@example.com" required autocomplete="email">
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="password">Password</label>
+        <input type="password" id="password" class="form-control" placeholder="••••••••••••" required autocomplete="current-password">
+      </div>
+
+      <button type="submit" id="submitBtn" class="btn btn-primary" style="width: 100%; margin-top: 1rem; padding: 0.8rem;">
+        Authenticate with Supabase
+      </button>
+    </form>
+
+    <div style="margin-top: 1.75rem; padding-top: 1.25rem; border-top: 1px solid var(--color-border); text-align: center; color: var(--color-muted); font-size: 0.78rem;">
+      Authentication managed via Supabase Auth.<br>
+      Session valid for 24 hours.
+    </div>
+  </div>
+
+  <script>
+    document.getElementById('loginForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const email = document.getElementById('email').value.trim();
+      const password = document.getElementById('password').value.trim();
+      const errorAlert = document.getElementById('errorAlert');
+      const submitBtn = document.getElementById('submitBtn');
+
+      errorAlert.style.display = 'none';
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Authenticating...';
+
+      try {
+        const resp = await fetch('/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password })
+        });
+
+        const data = await resp.json();
+        if (resp.ok) {
+          window.location.href = '/dashboard';
+        } else {
+          errorAlert.textContent = data.error || 'Authentication failed';
+          errorAlert.style.display = 'flex';
+        }
+      } catch (err) {
+        errorAlert.textContent = 'Connection error. Please try again.';
+        errorAlert.style.display = 'flex';
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Authenticate with Supabase';
+      }
+    });
+  </script>
+</body>
+</html>

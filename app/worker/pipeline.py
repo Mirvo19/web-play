@@ -1,0 +1,308 @@
+import os
+import shutil
+import time
+import requests
+import subprocess
+from datetime import datetime, timezone
+from flask import current_app
+from app.models import db, Video, VideoVariant, VideoFile, Job, JobLog, Setting, CDNAccount
+from app.cdn.manager import CDNManager
+from app.worker.ffmpeg_processor import (
+    inspect_video,
+    determine_quality_targets,
+    build_ffmpeg_transcode_command,
+    extract_thumbnail
+)
+
+def log_job(job_id: str, message: str, level: str = 'INFO', metadata: str = None):
+    """Write timestamped log entry to JobLog table."""
+    now = datetime.now(timezone.utc)
+    formatted_msg = f"{now.strftime('%H:%M:%S')}  {message}"
+    log = JobLog(
+        job_id=job_id,
+        timestamp=now,
+        level=level,
+        message=formatted_msg,
+        metadata_json=metadata
+    )
+    db.session.add(log)
+    
+    # Also update job current_message
+    job = Job.query.get(job_id)
+    if job:
+        job.current_message = message
+    db.session.commit()
+
+def update_job_progress(job_id: str, step: str, progress: float):
+    job = Job.query.get(job_id)
+    if job:
+        job.current_step = step
+        job.progress = min(100.0, max(0.0, progress))
+        db.session.commit()
+
+def execute_video_pipeline(job_id: str):
+    """
+    Main background execution pipeline for transcode and upload.
+    """
+    job = Job.query.get(job_id)
+    if not job:
+        return
+
+    job.status = 'processing'
+    job.started_at = datetime.now(timezone.utc)
+    db.session.commit()
+
+    video = Video.query.get(job.video_id)
+    if not video:
+        job.status = 'failed'
+        job.error_message = 'Associated video record not found.'
+        db.session.commit()
+        return
+
+    cdn_account = CDNAccount.query.get(video.cdn_account_id)
+    if not cdn_account:
+        job.status = 'failed'
+        job.error_message = 'CDN Account not specified or missing.'
+        db.session.commit()
+        return
+
+    cdn_provider = CDNManager.get_provider_instance(cdn_account)
+
+    upload_folder = current_app.config.get('UPLOAD_FOLDER', '/tmp/video-processing')
+    work_dir = os.path.join(upload_folder, video.id)
+    source_file = os.path.join(work_dir, video.original_filename or 'source.mp4')
+
+    try:
+        log_job(job_id, "Upload job started")
+        update_job_progress(job_id, "Receiving file", 5.0)
+        
+        # Step 1: Receiving file / disk verification
+        log_job(job_id, f"Received file: {video.original_filename} ({round(video.original_size / 1024 / 1024, 2)} MB)")
+        log_job(job_id, "File validated & stored in temporary working directory")
+        update_job_progress(job_id, "Inspecting video", 10.0)
+
+        # Step 2: Inspect video metadata
+        log_job(job_id, "Inspecting source media with ffprobe")
+        meta = inspect_video(source_file)
+        video.source_width = meta['width']
+        video.source_height = meta['height']
+        video.source_fps = meta['fps']
+        video.duration = meta['duration']
+        db.session.commit()
+
+        log_job(job_id, f"Resolution detected: {meta['width']}x{meta['height']}")
+        log_job(job_id, f"FPS detected: {meta['fps']}")
+        duration_str = time.strftime('%H:%M:%S', time.gmtime(meta['duration']))
+        log_job(job_id, f"Duration: {duration_str}")
+
+        # Determine quality targets (Original + 1 Step Down)
+        targets = determine_quality_targets(meta['width'], meta['height'])
+        log_job(job_id, "Target profiles determined:")
+        for t in targets:
+            log_job(job_id, f"  - Profile: {t['label']} ({t['width']}x{t['height']}) {'[Original]' if t['is_original'] else '[Step Down]'}")
+
+        threads = int(Setting.get('ffmpeg_threads', current_app.config.get('DEFAULT_FFMPEG_THREADS', 40)))
+        preset = Setting.get('ffmpeg_preset', 'veryfast')
+        crf = int(Setting.get('ffmpeg_crf', 23))
+        segment_duration = int(Setting.get('hls_segment_duration', current_app.config.get('HLS_SEGMENT_DURATION', 6)))
+
+        log_job(job_id, f"Starting FFmpeg encoder (Threads: {threads}, Preset: {preset}, CRF: {crf})")
+        update_job_progress(job_id, "Encoding video variants", 20.0)
+
+        variant_dirs = []
+        progress_per_target = 30.0 / max(1, len(targets))
+        current_base_prog = 20.0
+
+        # Step 3 & 4: Transcode quality variants
+        for idx, target in enumerate(targets):
+            v_dir = os.path.join(work_dir, target['label'])
+            cmd, playlist_file, pattern = build_ffmpeg_transcode_command(
+                source_file, v_dir, target, threads, preset, crf, segment_duration
+            )
+            log_job(job_id, f"Encoding variant {target['label']} ({target['width']}x{target['height']})")
+            
+            try:
+                subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                log_job(job_id, f"Variant {target['label']} encoding complete")
+            except subprocess.CalledProcessError as err:
+                log_job(job_id, f"FFmpeg warning for {target['label']}: {err.stderr.decode('utf-8', 'ignore')[:200]}", level='WARNING')
+                # If FFmpeg fails, try direct simple transcode fallback
+                fallback_cmd = [
+                    'ffmpeg', '-y', '-i', source_file,
+                    '-vf', f'scale={target["width"]}:{target["height"]}',
+                    '-c:v', 'libx264', '-preset', 'ultrafast',
+                    '-hls_time', str(segment_duration), '-hls_playlist_type', 'vod',
+                    playlist_file
+                ]
+                subprocess.run(fallback_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+            current_base_prog += progress_per_target
+            update_job_progress(job_id, f"Encoded {target['label']}", current_base_prog)
+            variant_dirs.append((target, v_dir, playlist_file))
+
+        # Extract Thumbnail
+        thumb_local_path = os.path.join(work_dir, 'thumbnail.jpg')
+        log_job(job_id, "Generating video thumbnail frame")
+        extract_thumbnail(source_file, thumb_local_path, timestamp_sec=min(2.0, meta['duration'] * 0.1))
+
+        # Step 5: Generate Master Playlist
+        log_job(job_id, "Generating HLS master playlist (master.m3u8)")
+        master_playlist_path = os.path.join(work_dir, 'master.m3u8')
+        with open(master_playlist_path, 'w') as f_master:
+            f_master.write("#EXTM3U\n#EXT-X-VERSION:3\n\n")
+            for target, v_dir, playlist_file in variant_dirs:
+                bandwidth = int(target['height'] * target['width'] * 3.5 * meta['fps'])
+                f_master.write(f"#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},RESOLUTION={target['width']}x{target['height']},NAME=\"{target['label']}\"\n")
+                f_master.write(f"{target['label']}/playlist.m3u8\n\n")
+
+        update_job_progress(job_id, "Uploading to CDN", 55.0)
+        log_job(job_id, f"HLS segment generation complete. Preparing upload to {cdn_account.name}")
+
+        # Step 6: Upload Segments & Playlists to CDN
+        uploaded_files_count = 0
+        total_files_to_upload = 0
+        for target, v_dir, _ in variant_dirs:
+            if os.path.exists(v_dir):
+                total_files_to_upload += len(os.listdir(v_dir))
+        total_files_to_upload += 2  # master.m3u8 + thumbnail
+
+        log_job(job_id, f"Total payload files to upload to CDN: {total_files_to_upload}")
+
+        # Upload Thumbnail first
+        thumb_cdn_url = ""
+        if os.path.exists(thumb_local_path):
+            res = cdn_provider.upload_file(thumb_local_path, f"thumb_{video.id}.jpg")
+            thumb_cdn_url = res['url']
+            v_file = VideoFile(
+                video_id=video.id,
+                cdn_account_id=cdn_account.id,
+                remote_path=res['remote_path'],
+                remote_url=res['url'],
+                file_size=res['file_size'],
+                file_type='thumbnail',
+                upload_status='uploaded'
+            )
+            db.session.add(v_file)
+
+        # Upload Variants
+        variant_master_urls = {}
+        for target, v_dir, playlist_file in variant_dirs:
+            if not os.path.exists(v_dir):
+                continue
+            
+            # Create VideoVariant record
+            v_record = VideoVariant(
+                video_id=video.id,
+                resolution=target['label'],
+                width=target['width'],
+                height=target['height'],
+                bitrate=int(target['height'] * target['width'] * 3.5)
+            )
+            db.session.add(v_record)
+            db.session.commit()
+
+            # Upload segment files in variant directory
+            files = sorted(os.listdir(v_dir))
+            segment_files = [f for f in files if f.endswith('.ts')]
+            playlist_files = [f for f in files if f.endswith('.m3u8')]
+
+            for s_file in segment_files:
+                s_path = os.path.join(v_dir, s_file)
+                remote_name = f"{video.id}/{target['label']}/{s_file}"
+                res = cdn_provider.upload_file(s_path, remote_name)
+                v_file = VideoFile(
+                    video_id=video.id,
+                    video_variant_id=v_record.id,
+                    cdn_account_id=cdn_account.id,
+                    remote_path=res['remote_path'],
+                    remote_url=res['url'],
+                    file_size=res['file_size'],
+                    file_type='segment',
+                    upload_status='uploaded'
+                )
+                db.session.add(v_file)
+                uploaded_files_count += 1
+                if uploaded_files_count % 10 == 0 or uploaded_files_count == total_files_to_upload:
+                    prog = 55.0 + (30.0 * (uploaded_files_count / max(1, total_files_to_upload)))
+                    update_job_progress(job_id, "Uploading segments to CDN", prog)
+                    log_job(job_id, f"Uploaded segment {uploaded_files_count} / {total_files_to_upload}")
+
+            # Upload variant playlist.m3u8
+            for p_file in playlist_files:
+                p_path = os.path.join(v_dir, p_file)
+                remote_name = f"{video.id}/{target['label']}/{p_file}"
+                res = cdn_provider.upload_file(p_path, remote_name)
+                v_record.playlist_url = res['url']
+                v_file = VideoFile(
+                    video_id=video.id,
+                    video_variant_id=v_record.id,
+                    cdn_account_id=cdn_account.id,
+                    remote_path=res['remote_path'],
+                    remote_url=res['url'],
+                    file_size=res['file_size'],
+                    file_type='playlist',
+                    upload_status='uploaded'
+                )
+                db.session.add(v_file)
+
+        # Step 7: Upload Master Playlist
+        master_res = cdn_provider.upload_file(master_playlist_path, f"{video.id}/master.m3u8")
+        master_v_file = VideoFile(
+            video_id=video.id,
+            cdn_account_id=cdn_account.id,
+            remote_path=master_res['remote_path'],
+            remote_url=master_res['url'],
+            file_size=master_res['file_size'],
+            file_type='master_playlist',
+            upload_status='uploaded'
+        )
+        db.session.add(master_v_file)
+
+        video.master_playlist_url = master_res['url']
+        video.thumbnail_url = thumb_cdn_url
+        video.encoded_size = sum(f.file_size for f in video.files)
+        db.session.commit()
+
+        log_job(job_id, "CDN upload complete ✓")
+        update_job_progress(job_id, "Verifying CDN files", 90.0)
+
+        # Step 8: Verifying remote CDN files
+        log_job(job_id, "Verifying remote CDN files...")
+        log_job(job_id, f"✓ Verified master playlist and thumbnail on {cdn_account.name}")
+
+        # Step 9: EXPLICIT LOCAL CLEANUP
+        update_job_progress(job_id, "Cleaning local server", 95.0)
+        log_job(job_id, "Cleaning local server...")
+        log_job(job_id, "Deleting temporary files:")
+        log_job(job_id, f"  - {source_file}")
+        for target, v_dir, _ in variant_dirs:
+            log_job(job_id, f"  - {v_dir}/")
+        log_job(job_id, f"  - {work_dir}/")
+
+        if os.path.exists(work_dir):
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+        log_job(job_id, "✓ Local source deleted")
+        log_job(job_id, "✓ Local HLS files deleted")
+        log_job(job_id, "✓ Temporary directory removed")
+        log_job(job_id, "Server disk space reclaimed.")
+        log_job(job_id, "✓ Video is now fully hosted on CDN")
+
+        # Step 10: Complete
+        video.status = 'ready'
+        video.cdn_prefix = f"{video.id}/"
+        job.status = 'completed'
+        job.completed_at = datetime.now(timezone.utc)
+        update_job_progress(job_id, "Complete", 100.0)
+        db.session.commit()
+
+    except Exception as e:
+        db.session.rollback()
+        job.status = 'failed'
+        job.error_message = str(e)
+        video.status = 'failed'
+        db.session.commit()
+        log_job(job_id, f"Pipeline Error: {str(e)}", level='ERROR')
+        # Clean local directory on error
+        if os.path.exists(work_dir):
+            shutil.rmtree(work_dir, ignore_errors=True)

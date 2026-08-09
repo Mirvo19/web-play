@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+
+{% block title %}Processing Settings — Video Infrastructure Platform{% endblock %}
+{% block header_title %}FFmpeg CPU & Queue Processing Controls{% endblock %}
+
+{% block content %}
+<div class="grid-2">
+  <!-- Settings Form -->
+  <div class="clay-card">
+    <div class="clay-card-header">
+      <h3 class="clay-card-title">FFmpeg Transcoding Configuration</h3>
+    </div>
+
+    <form id="settingsForm">
+      <div class="form-group">
+        <label class="form-label" for="ffmpegThreads">FFmpeg CPU Threads (1 – 92)</label>
+        <input type="number" id="ffmpegThreads" class="form-control" min="1" max="92" value="{{ settings.ffmpeg_threads }}" required>
+        <div style="font-size: 0.78rem; color: var(--color-muted); margin-top: 0.3rem;">
+          Detected hardware: 48 cores / 92 threads. Recommended: 40 threads for fast single-job encoding.
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="maxConcurrency">Maximum Concurrent Video Jobs</label>
+        <input type="number" id="maxConcurrency" class="form-control" min="1" max="5" value="{{ settings.max_concurrent_jobs }}" required>
+        <div style="font-size: 0.78rem; color: var(--color-muted); margin-top: 0.3rem;">
+          Server RAM is limited to 2 GB. Keep at 1 job to accelerate processing using all CPU threads without running out of RAM.
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="ffmpegPreset">FFmpeg Encoding Preset</label>
+        <select id="ffmpegPreset" class="form-select" required>
+          <option value="ultrafast" {% if settings.ffmpeg_preset == 'ultrafast' %}selected{% endif %}>ultrafast (Fastest, lower compression)</option>
+          <option value="superfast" {% if settings.ffmpeg_preset == 'superfast' %}selected{% endif %}>superfast</option>
+          <option value="veryfast" {% if settings.ffmpeg_preset == 'veryfast' or not settings.ffmpeg_preset %}selected{% endif %}>veryfast (Recommended balance)</option>
+          <option value="faster" {% if settings.ffmpeg_preset == 'faster' %}selected{% endif %}>faster</option>
+          <option value="fast" {% if settings.ffmpeg_preset == 'fast' %}selected{% endif %}>fast</option>
+          <option value="medium" {% if settings.ffmpeg_preset == 'medium' %}selected{% endif %}>medium (Slower, higher compression)</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="ffmpegCrf">Constant Rate Factor (CRF: 18 – 28)</label>
+        <input type="number" id="ffmpegCrf" class="form-control" min="18" max="28" value="{{ settings.ffmpeg_crf }}" required>
+        <div style="font-size: 0.78rem; color: var(--color-muted); margin-top: 0.3rem;">
+          Lower values mean higher visual quality. 23 is default for H.264 video encoding.
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="hlsSegmentDuration">HLS Segment Duration (Seconds)</label>
+        <input type="number" id="hlsSegmentDuration" class="form-control" min="4" max="12" value="{{ settings.hls_segment_duration }}" required>
+        <div style="font-size: 0.78rem; color: var(--color-muted); margin-top: 0.3rem;">
+          Target segment duration in seconds. Default is 6 seconds (yields 5–10 MB segments).
+        </div>
+      </div>
+
+      <button type="submit" class="btn btn-primary" style="width: 100%; margin-top: 1rem;">
+        Save Processing Settings
+      </button>
+    </form>
+  </div>
+
+  <!-- Hardware Overview Card -->
+  <div class="clay-card">
+    <div class="clay-card-header">
+      <h3 class="clay-card-title">Server Hardware Profile</h3>
+    </div>
+    
+    <div style="font-size: 0.88rem; color: var(--color-muted); line-height: 1.7;">
+      <p style="margin-bottom: 0.8rem;">
+        <strong style="color: var(--color-text);">CPU:</strong> 48 physical cores / 92 logical threads (High Compute Capacity).
+      </p>
+      <p style="margin-bottom: 0.8rem;">
+        <strong style="color: var(--color-text);">RAM:</strong> 2.00 GB Total (Low Memory Ceiling).
+      </p>
+      <p style="margin-bottom: 0.8rem;">
+        <strong style="color: var(--color-text);">Disk:</strong> 16.00 GB Local NVMe/SSD Storage (Mandatory Local Cleanup).
+      </p>
+      <p>
+        <strong style="color: var(--color-text);">Strategy:</strong> Allocate high thread counts (40–80 threads) to a single concurrent job. Immediately clean up local temporary files after CDN verification.
+      </p>
+    </div>
+  </div>
+</div>
+
+<script>
+  document.getElementById('settingsForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    const ffmpeg_threads = document.getElementById('ffmpegThreads').value;
+    const max_concurrent_jobs = document.getElementById('maxConcurrency').value;
+    const ffmpeg_preset = document.getElementById('ffmpegPreset').value;
+    const ffmpeg_crf = document.getElementById('ffmpegCrf').value;
+    const hls_segment_duration = document.getElementById('hlsSegmentDuration').value;
+
+    try {
+      const resp = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ffmpeg_threads,
+          max_concurrent_jobs,
+          ffmpeg_preset,
+          ffmpeg_crf,
+          hls_segment_duration
+        })
+      });
+
+      const data = await resp.json();
+      if (resp.ok) {
+        alert("Processing settings updated dynamically!");
+      } else {
+        alert("Error: " + (data.error || "Failed to update settings"));
+      }
+    } catch (err) {
+      alert("Network error updating settings.");
+    }
+  });
+</script>
+{% endblock %}

@@ -1,0 +1,165 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard — Video Infrastructure Platform{% endblock %}
+{% block header_title %}System Overview & Video Library{% endblock %}
+
+{% block content %}
+<!-- Overview Stats Grid -->
+<div class="grid-4" style="margin-bottom: 2rem;">
+  <div class="clay-card" style="margin-bottom: 0;">
+    <span style="color: var(--color-muted); font-size: 0.8rem; font-weight: 600; text-transform: uppercase;">Total Videos</span>
+    <div style="font-size: 1.8rem; font-weight: 700; color: var(--color-text); margin-top: 0.3rem;">{{ videos|length }}</div>
+    <span style="color: var(--color-muted); font-size: 0.78rem;">Hosted on CDN</span>
+  </div>
+
+  <div class="clay-card" style="margin-bottom: 0;">
+    <span style="color: var(--color-muted); font-size: 0.8rem; font-weight: 600; text-transform: uppercase;">CDN Storage Used</span>
+    <div style="font-size: 1.8rem; font-weight: 700; color: var(--color-text); margin-top: 0.3rem;">
+      {{ round(used_cdn_bytes / 1024 / 1024 / 1024, 2) }} GB
+    </div>
+    <span style="color: var(--color-muted); font-size: 0.78rem;">
+      Available: {{ round(available_cdn_bytes / 1024 / 1024 / 1024, 1) }} GB
+    </span>
+  </div>
+
+  <div class="clay-card" style="margin-bottom: 0;">
+    <span style="color: var(--color-muted); font-size: 0.8rem; font-weight: 600; text-transform: uppercase;">Active Jobs</span>
+    <div style="font-size: 1.8rem; font-weight: 700; color: var(--color-text); margin-top: 0.3rem;">{{ active_jobs }}</div>
+    <span style="color: var(--color-muted); font-size: 0.78rem;">Transcoding / Deleting</span>
+  </div>
+
+  <div class="clay-card" style="margin-bottom: 0;">
+    <span style="color: var(--color-muted); font-size: 0.8rem; font-weight: 600; text-transform: uppercase;">CDN Accounts</span>
+    <div style="font-size: 1.8rem; font-weight: 700; color: var(--color-text); margin-top: 0.3rem;">{{ cdn_accounts|length }}</div>
+    <span style="color: var(--color-muted); font-size: 0.78rem;">Connected Providers</span>
+  </div>
+</div>
+
+<!-- Video Library Table -->
+<div class="clay-card">
+  <div class="clay-card-header">
+    <h3 class="clay-card-title">Video Library</h3>
+    <a href="{{ url_for('views.upload') }}" class="btn btn-primary">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+      Upload Video
+    </a>
+  </div>
+
+  {% if videos %}
+  <div class="table-container">
+    <table class="clay-table">
+      <thead>
+        <tr>
+          <th>Video</th>
+          <th>Resolution</th>
+          <th>Duration</th>
+          <th>Size</th>
+          <th>CDN Account</th>
+          <th>Status</th>
+          <th style="text-align: right;">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for video in videos %}
+        <tr>
+          <td style="font-weight: 600;">
+            <div style="display: flex; align-items: center; gap: 0.75rem;">
+              {% if video.thumbnail_url %}
+                <img src="{{ video.thumbnail_url }}" alt="Thumbnail" style="width: 54px; height: 32px; object-fit: cover; border-radius: 4px;">
+              {% else %}
+                <div style="width: 54px; height: 32px; background-color: var(--bg-surface); border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 0.7rem; color: var(--color-muted);">No IMG</div>
+              {% endif %}
+              <div>
+                <div>{{ video.title }}</div>
+                <div style="font-size: 0.78rem; color: var(--color-muted);">{{ video.original_filename or '' }}</div>
+              </div>
+            </div>
+          </td>
+          <td>
+            {% if video.source_height > 0 %}
+              <span class="badge badge-info">{{ video.source_height }}p ({{ video.source_width }}x{{ video.source_height }})</span>
+            {% else %}
+              <span style="color: var(--color-muted);">Detecting...</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if video.duration > 0 %}
+              {{ round(video.duration / 60, 1) }}m
+            {% else %}
+              -
+            {% endif %}
+          </td>
+          <td>
+            {% if video.encoded_size > 0 %}
+              {{ round(video.encoded_size / 1024 / 1024, 1) }} MB
+            {% elif video.original_size > 0 %}
+              {{ round(video.original_size / 1024 / 1024, 1) }} MB (Src)
+            {% else %}
+              -
+            {% endif %}
+          </td>
+          <td>
+            <span class="badge badge-info" style="background-color: var(--bg-surface); color: var(--color-text);">
+              {{ video.cdn_account.name if video.cdn_account else 'Hack Club CDN' }}
+            </span>
+          </td>
+          <td>
+            {% if video.status == 'ready' %}
+              <span class="badge badge-success">Ready</span>
+            {% elif video.status == 'processing' %}
+              <span class="badge badge-warning">Processing</span>
+            {% elif video.status == 'delete_pending' %}
+              <span class="badge badge-warning">Deleting...</span>
+            {% else %}
+              <span class="badge badge-danger">{{ video.status|capitalize }}</span>
+            {% endif %}
+          </td>
+          <td style="text-align: right;">
+            <div style="display: inline-flex; gap: 0.5rem;">
+              {% if video.status == 'ready' %}
+                <a href="{{ url_for('views.watch', video_id=video.id) }}" class="btn" style="padding: 0.4rem 0.75rem; font-size: 0.8rem;">
+                  Watch
+                </a>
+              {% endif %}
+              <button onclick="confirmDeleteVideo('{{ video.id }}', '{{ video.title|replace("'", "\\'") }}')" class="btn btn-danger" style="padding: 0.4rem 0.75rem; font-size: 0.8rem;">
+                Delete
+              </button>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div style="text-align: center; padding: 3rem; color: var(--color-muted);">
+    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="margin-bottom: 1rem;"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>
+    <p style="font-size: 1rem; font-weight: 500; color: var(--color-text);">No videos uploaded yet</p>
+    <p style="font-size: 0.85rem; margin-top: 0.3rem;">Upload your first video to transcode HLS and host on Hack Club CDN.</p>
+    <a href="{{ url_for('views.upload') }}" class="btn btn-primary" style="margin-top: 1.25rem;">
+      Upload Video
+    </a>
+  </div>
+  {% endif %}
+</div>
+
+<script>
+  async function confirmDeleteVideo(id, title) {
+    if (!confirm(`Are you sure you want to completely delete "${title}"?\n\nThis will permanently remove all HLS segments, playlists, and thumbnails from Hack Club CDN.`)) {
+      return;
+    }
+    try {
+      const resp = await fetch(`/api/videos/${id}`, { method: 'DELETE' });
+      const data = await resp.json();
+      if (resp.ok) {
+        alert("Deletion job queued. The video and all CDN files are being safely removed.");
+        window.location.reload();
+      } else {
+        alert("Delete error: " + (data.error || "Failed to queue deletion"));
+      }
+    } catch (err) {
+      alert("Error contacting server for deletion.");
+    }
+  }
+</script>
+{% endblock %}

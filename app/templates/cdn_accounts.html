@@ -1,0 +1,160 @@
+{% extends "base.html" %}
+
+{% block title %}CDN Accounts — Video Infrastructure Platform{% endblock %}
+{% block header_title %}Dynamic CDN Account Management{% endblock %}
+
+{% block content %}
+<div class="grid-2">
+  <!-- Add CDN Account Form -->
+  <div class="clay-card">
+    <div class="clay-card-header">
+      <h3 class="clay-card-title">Add CDN Account</h3>
+    </div>
+
+    <form id="addCdnForm">
+      <div class="form-group">
+        <label class="form-label" for="accName">Account Name</label>
+        <input type="text" id="accName" class="form-control" placeholder="Samir's CDN" required>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="provider">Provider</label>
+        <input type="text" id="provider" class="form-control" value="Hack Club CDN" readonly style="background-color: var(--bg-surface);">
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="apiKey">API Key (Bearer Token)</label>
+        <input type="password" id="apiKey" class="form-control" placeholder="••••••••••••••••••••••••••••••••" required>
+        <div style="font-size: 0.78rem; color: var(--color-muted); margin-top: 0.3rem;">
+          Encrypted server-side using Fernet. Never exposed in HTML or client logs.
+        </div>
+      </div>
+
+      <div style="display: flex; gap: 0.75rem; margin-top: 1rem;">
+        <button type="submit" class="btn btn-primary" style="flex: 1;">Save Account</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- CDN Info Card -->
+  <div class="clay-card">
+    <div class="clay-card-header">
+      <h3 class="clay-card-title">Hack Club CDN Limits</h3>
+    </div>
+    <div style="font-size: 0.88rem; color: var(--color-muted); line-height: 1.6;">
+      <p style="margin-bottom: 0.75rem;"><strong>File Size Limit:</strong> 100 MB max per segment. Video segments are automatically split into 5-10 MB HLS chunks.</p>
+      <p style="margin-bottom: 0.75rem;"><strong>Storage Capacity:</strong> ~50 GB per CDN account.</p>
+      <p><strong>Multi-Account Support:</strong> Add multiple accounts (1, 2, 5, 10, 20+) to scale storage capacity dynamically.</p>
+    </div>
+  </div>
+</div>
+
+<!-- CDN Accounts Table -->
+<div class="clay-card" style="margin-top: 1.5rem;">
+  <div class="clay-card-header">
+    <h3 class="clay-card-title">Configured CDN Accounts</h3>
+  </div>
+
+  {% if cdn_accounts %}
+  <div class="table-container">
+    <table class="clay-table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Provider</th>
+          <th>API Key</th>
+          <th>Storage Used / Capacity</th>
+          <th>Status</th>
+          <th style="text-align: right;">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for acc in cdn_accounts %}
+        <tr>
+          <td style="font-weight: 600;">{{ acc.name }}</td>
+          <td>
+            <span class="badge badge-info">{{ acc.provider }}</span>
+          </td>
+          <td style="font-family: var(--font-mono); font-size: 0.82rem; color: var(--color-muted);">
+            {{ acc.masked_key }}
+          </td>
+          <td style="width: 200px;">
+            <div style="font-size: 0.8rem; margin-bottom: 0.2rem;">
+              {{ round(acc.storage.used_bytes / 1024 / 1024 / 1024, 2) }} GB / {{ round(acc.storage.total_bytes / 1024 / 1024 / 1024, 0) }} GB
+            </div>
+            <div class="progress-bar-container">
+              <div class="progress-bar-fill" style="width: {{ min(100.0, round((acc.storage.used_bytes / max(1, acc.storage.total_bytes)) * 100, 1)) }}%;"></div>
+            </div>
+          </td>
+          <td>
+            <span class="badge badge-success">Connected</span>
+          </td>
+          <td style="text-align: right;">
+            <div style="display: inline-flex; gap: 0.4rem;">
+              <button onclick="testConnection('{{ acc.id }}')" class="btn" style="padding: 0.35rem 0.65rem; font-size: 0.8rem;">
+                Test
+              </button>
+              <button onclick="deleteAccount('{{ acc.id }}', '{{ acc.name }}')" class="btn btn-danger" style="padding: 0.35rem 0.65rem; font-size: 0.8rem;">
+                Delete
+              </button>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div style="text-align: center; padding: 2rem; color: var(--color-muted);">
+    No CDN accounts added yet. Add your Hack Club CDN API key above.
+  </div>
+  {% endif %}
+</div>
+
+<script>
+  document.getElementById('addCdnForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const name = document.getElementById('accName').value.trim();
+    const provider = document.getElementById('provider').value.trim();
+    const apiKey = document.getElementById('apiKey').value.trim();
+
+    try {
+      const resp = await fetch('/api/cdn-accounts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, provider, api_key: apiKey })
+      });
+
+      const data = await resp.json();
+      if (resp.ok) {
+        alert(`CDN Account "${name}" saved and key encrypted successfully.`);
+        window.location.reload();
+      } else {
+        alert("Error: " + (data.error || "Failed to save CDN account"));
+      }
+    } catch (err) {
+      alert("Network error saving CDN account.");
+    }
+  });
+
+  async function testConnection(id) {
+    try {
+      const resp = await fetch(`/api/cdn-accounts/${id}/test`, { method: 'POST' });
+      const data = await resp.json();
+      alert(`Test Result: ${data.message}`);
+    } catch (err) {
+      alert("Test connection failed.");
+    }
+  }
+
+  async function deleteAccount(id, name) {
+    if (!confirm(`Delete CDN account "${name}"?`)) return;
+    try {
+      const resp = await fetch(`/api/cdn-accounts/${id}`, { method: 'DELETE' });
+      if (resp.ok) {
+        window.location.reload();
+      }
+    } catch (err) {}
+  }
+</script>
+{% endblock %}

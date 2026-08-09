@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+
+{% block title %}Job Logs — {{ job.id[:8] }}{% endblock %}
+{% block header_title %}Job Execution Logs{% endblock %}
+
+{% block content %}
+<div class="clay-card">
+  <div class="clay-card-header">
+    <div>
+      <h3 class="clay-card-title">Job #{{ job.id }}</h3>
+      <span style="font-size: 0.8rem; color: var(--color-muted);">Type: {{ job.job_type }} | Status: {{ job.status }}</span>
+    </div>
+    <a href="{{ url_for('views.jobs_list') }}" class="btn">Back to Jobs</a>
+  </div>
+
+  <div style="margin-bottom: 1.5rem;">
+    <div style="display: flex; justify-content: space-between; font-weight: 600; font-size: 0.9rem; margin-bottom: 0.4rem;">
+      <span>{{ job.current_step }}</span>
+      <span>{{ round(job.progress, 1) }}%</span>
+    </div>
+    <div class="progress-bar-container" style="height: 12px;">
+      <div class="progress-bar-fill" style="width: {{ job.progress }}%;"></div>
+    </div>
+  </div>
+
+  <label class="form-label">Verbose Real-time Log Stream</label>
+  <div id="jobDetailLogBox" class="log-console" style="max-height: 500px;">
+    {% for log in job.logs %}
+{{ log.message }}
+    {% endfor %}
+  </div>
+</div>
+
+<script>
+  const jobId = "{{ job.id }}";
+  setInterval(async () => {
+    try {
+      const resp = await fetch(`/api/jobs/${jobId}/logs`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const logs = data.logs;
+      const logBox = document.getElementById('jobDetailLogBox');
+      logBox.textContent = logs.map(l => l.message).join('\n');
+    } catch (e) {}
+  }, 2000);
+</script>
+{% endblock %}

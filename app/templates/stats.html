@@ -1,0 +1,165 @@
+{% extends "base.html" %}
+
+{% block title %}Server Stats — Video Infrastructure Platform{% endblock %}
+{% block header_title %}Live Server Resources & Capacity Monitor{% endblock %}
+
+{% block content %}
+<div class="grid-3" style="margin-bottom: 1.5rem;">
+  <!-- CPU Stats Card -->
+  <div class="clay-card">
+    <div class="clay-card-header">
+      <h3 class="clay-card-title">CPU Utilization</h3>
+    </div>
+    <div style="font-size: 1.8rem; font-weight: 700; id='cpuPercentText'">71%</div>
+    <div class="progress-bar-container">
+      <div id="cpuProgressBar" class="progress-bar-fill" style="width: 71%;"></div>
+    </div>
+    <div style="font-size: 0.82rem; color: var(--color-muted); margin-top: 0.5rem;">
+      Hardware: <strong style="color: var(--color-text);">48 cores / 92 threads</strong><br>
+      FFmpeg Alloc: <span id="ffmpegThreadsText">40 threads</span>
+    </div>
+  </div>
+
+  <!-- RAM Stats Card -->
+  <div class="clay-card">
+    <div class="clay-card-header">
+      <h3 class="clay-card-title">RAM Usage</h3>
+    </div>
+    <div style="font-size: 1.8rem; font-weight: 700;" id="ramUsedText">1.21 GB</div>
+    <div class="progress-bar-container">
+      <div id="ramProgressBar" class="progress-bar-fill" style="width: 60%;"></div>
+    </div>
+    <div style="font-size: 0.82rem; color: var(--color-muted); margin-top: 0.5rem;">
+      Available: <span id="ramAvailText">790 MB</span> | Total: 2.00 GB<br>
+      Swap Used: <span id="swapUsedText">0 MB</span>
+    </div>
+  </div>
+
+  <!-- Disk Stats Card -->
+  <div class="clay-card">
+    <div class="clay-card-header">
+      <h3 class="clay-card-title">Disk Storage</h3>
+    </div>
+    <div style="font-size: 1.8rem; font-weight: 700;" id="diskUsedText">8.1 GB</div>
+    <div class="progress-bar-container">
+      <div id="diskProgressBar" class="progress-bar-fill" style="width: 51%;"></div>
+    </div>
+    <div style="font-size: 0.82rem; color: var(--color-muted); margin-top: 0.5rem;">
+      Free: <span id="diskFreeText">7.9 GB</span> | Total: 16.0 GB<br>
+      Temp Video Storage: <span id="tempStorageText">0 MB</span>
+    </div>
+  </div>
+</div>
+
+<div class="grid-2">
+  <!-- Capacity Calculator Card -->
+  <div class="clay-card">
+    <div class="clay-card-header">
+      <h3 class="clay-card-title">CDN Capacity Calculator</h3>
+    </div>
+    <p style="font-size: 0.85rem; color: var(--color-muted); margin-bottom: 1.25rem;">
+      Estimated video streaming hours remaining based on total available CDN storage.
+    </p>
+
+    <div style="display: flex; flex-direction: column; gap: 0.75rem;">
+      <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.75rem; background-color: var(--bg-surface); border-radius: var(--radius-md); border: 1px solid var(--color-border);">
+        <div>
+          <strong style="color: var(--color-text);">1440p (2K Quality)</strong>
+          <div style="font-size: 0.75rem; color: var(--color-muted);">Estimated ~8 Mbps bitrate</div>
+        </div>
+        <div style="font-family: var(--font-mono); font-size: 1.2rem; font-weight: 700; color: var(--color-accent);" id="calc1440p">~3h 12m</div>
+      </div>
+
+      <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.75rem; background-color: var(--bg-surface); border-radius: var(--radius-md); border: 1px solid var(--color-border);">
+        <div>
+          <strong style="color: var(--color-text);">1080p (Full HD)</strong>
+          <div style="font-size: 0.75rem; color: var(--color-muted);">Estimated ~4.5 Mbps bitrate</div>
+        </div>
+        <div style="font-family: var(--font-mono); font-size: 1.2rem; font-weight: 700; color: var(--color-accent);" id="calc1080p">~5h 48m</div>
+      </div>
+
+      <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.75rem; background-color: var(--bg-surface); border-radius: var(--radius-md); border: 1px solid var(--color-border);">
+        <div>
+          <strong style="color: var(--color-text);">720p (HD Quality)</strong>
+          <div style="font-size: 0.75rem; color: var(--color-muted);">Estimated ~2.5 Mbps bitrate</div>
+        </div>
+        <div style="font-family: var(--font-mono); font-size: 1.2rem; font-weight: 700; color: var(--color-accent);" id="calc720p">~11h 32m</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Active Job FFmpeg Stats Card -->
+  <div class="clay-card">
+    <div class="clay-card-header">
+      <h3 class="clay-card-title">Current FFmpeg Worker Stats</h3>
+    </div>
+    
+    <div id="activeJobStatus">
+      <div style="color: var(--color-muted); font-size: 0.9rem; text-align: center; padding: 2rem;">
+        No video transcoding job currently active.
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  async function fetchServerStats() {
+    try {
+      const resp = await fetch('/api/system/stats');
+      if (!resp.ok) return;
+      const data = await resp.json();
+
+      // CPU
+      document.getElementById('cpuProgressBar').style.width = `${data.cpu.usage_percent}%`;
+
+      // RAM
+      const ramUsedGB = (data.ram.used_bytes / 1024 / 1024 / 1024).toFixed(2);
+      const ramAvailMB = Math.round(data.ram.available_bytes / 1024 / 1024);
+      document.getElementById('ramUsedText').textContent = `${ramUsedGB} GB`;
+      document.getElementById('ramAvailText').textContent = `${ramAvailMB} MB`;
+      document.getElementById('ramProgressBar').style.width = `${data.ram.percent}%`;
+
+      // Disk
+      const diskUsedGB = (data.disk.used_bytes / 1024 / 1024 / 1024).toFixed(1);
+      const diskFreeGB = (data.disk.free_bytes / 1024 / 1024 / 1024).toFixed(1);
+      const tempMB = Math.round(data.disk.temp_folder_size / 1024 / 1024);
+      document.getElementById('diskUsedText').textContent = `${diskUsedGB} GB`;
+      document.getElementById('diskFreeText').textContent = `${diskFreeGB} GB`;
+      document.getElementById('tempStorageText').textContent = `${tempMB} MB`;
+      const diskPct = Math.round((data.disk.used_bytes / data.disk.total_bytes) * 100);
+      document.getElementById('diskProgressBar').style.width = `${diskPct}%`;
+
+      // Capacity Calculator
+      document.getElementById('calc1440p').textContent = `~${data.capacity_calculator.hours_1440p} hrs`;
+      document.getElementById('calc1080p').textContent = `~${data.capacity_calculator.hours_1080p} hrs`;
+      document.getElementById('calc720p').textContent = `~${data.capacity_calculator.hours_720p} hrs`;
+
+      // Active Job
+      const jobDiv = document.getElementById('activeJobStatus');
+      if (data.active_job) {
+        const job = data.active_job;
+        jobDiv.innerHTML = `
+          <div style="margin-bottom: 1rem;">
+            <div style="font-weight: 600; font-size: 0.95rem;">${job.current_step}</div>
+            <div style="font-size: 0.82rem; color: var(--color-muted); margin-top: 0.2rem;">${job.current_message}</div>
+          </div>
+          <div class="progress-bar-container" style="height: 12px; margin-bottom: 1rem;">
+            <div class="progress-bar-fill" style="width: ${job.progress}%;"></div>
+          </div>
+          <div style="font-family: var(--font-mono); font-size: 0.8rem; background-color: var(--bg-input); padding: 0.75rem; border-radius: var(--radius-sm); border: 1px solid var(--color-border);">
+            Progress: ${job.progress}%<br>
+            Active Threads: ${data.cpu.logical_threads || 40}
+          </div>
+        `;
+      } else {
+        jobDiv.innerHTML = `<div style="color: var(--color-muted); font-size: 0.9rem; text-align: center; padding: 2rem;">No video transcoding job currently active.</div>`;
+      }
+    } catch (e) {
+      console.error("Stats fetch error:", e);
+    }
+  }
+
+  fetchServerStats();
+  setInterval(fetchServerStats, 3000);
+</script>
+{% endblock %}

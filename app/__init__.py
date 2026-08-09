@@ -1,0 +1,59 @@
+import os
+from flask import Flask
+from app.config import Config
+from app.models import db, Setting, CDNAccount
+from app.auth import auth_bp
+from app.routes.views import views_bp
+from app.routes.api import api_bp
+from app.worker.background import start_background_worker
+
+def create_app(config_class=Config):
+    app = Flask(__name__)
+    app.config.from_object(config_class)
+
+    # Initialize extensions
+    db.init_app(app)
+
+    # Inject built-in helpers into Jinja templates
+    app.jinja_env.globals.update(
+        round=round,
+        min=min,
+        max=max,
+        int=int
+    )
+
+    # Register Blueprints
+    app.register_blueprint(auth_bp)
+    app.register_blueprint(views_bp)
+    app.register_blueprint(api_bp)
+
+    # Initialize DB & Default Settings inside App Context
+    with app.app_context():
+        db.create_all()
+
+        # Set default processing settings if missing
+        if not Setting.get('ffmpeg_threads'):
+            Setting.set('ffmpeg_threads', str(app.config.get('DEFAULT_FFMPEG_THREADS', 40)))
+        if not Setting.get('max_concurrent_jobs'):
+            Setting.set('max_concurrent_jobs', str(app.config.get('MAX_CONCURRENT_JOBS', 1)))
+        if not Setting.get('ffmpeg_preset'):
+            Setting.set('ffmpeg_preset', 'veryfast')
+        if not Setting.get('ffmpeg_crf'):
+            Setting.set('ffmpeg_crf', '23')
+        if not Setting.get('hls_segment_duration'):
+            Setting.set('hls_segment_duration', str(app.config.get('HLS_SEGMENT_DURATION', 6)))
+
+        # Create default CDN account if none exist
+        if CDNAccount.query.count() == 0:
+            default_cdn = CDNAccount(
+                name="Primary Hack Club CDN",
+                provider="Hack Club CDN"
+            )
+            default_cdn.set_api_key("hackclub_default_demo_api_key")
+            db.session.add(default_cdn)
+            db.session.commit()
+
+        # Start persistent background worker thread
+        start_background_worker(app)
+
+    return app

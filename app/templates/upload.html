@@ -1,0 +1,178 @@
+{% extends "base.html" %}
+
+{% block title %}Upload Video — Video Infrastructure Platform{% endblock %}
+{% block header_title %}Transcode & Upload Video to CDN{% endblock %}
+
+{% block content %}
+<div class="grid-2">
+  <!-- Upload Form -->
+  <div class="clay-card">
+    <div class="clay-card-header">
+      <h3 class="clay-card-title">Upload Video File</h3>
+    </div>
+
+    <form id="uploadForm">
+      <div class="form-group">
+        <label class="form-label" for="videoFile">Video File (MP4, MKV, MOV, AVI)</label>
+        <input type="file" id="videoFile" class="form-control" accept="video/*" required>
+        <div style="font-size: 0.78rem; color: var(--color-muted); margin-top: 0.3rem;">
+          Streamed directly to server disk. Max per CDN file segment: 100 MB.
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="title">Title</label>
+        <input type="text" id="title" class="form-control" placeholder="My Video Title" required>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="description">Description (Optional)</label>
+        <textarea id="description" class="form-control" rows="3" placeholder="Video description..."></textarea>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="cdnSelect">Upload to CDN Account (Manual Selection)</label>
+        <select id="cdnSelect" class="form-select" required>
+          {% if cdn_accounts %}
+            {% for acc in cdn_accounts %}
+              <option value="{{ acc.id }}">
+                {{ acc.name }} — {{ round(acc.storage.available_bytes / 1024 / 1024 / 1024, 1) }} GB free
+              </option>
+            {% endfor %}
+          {% else %}
+            <option value="" disabled selected>No CDN Accounts Configured! Please add one in CDN Accounts.</option>
+          {% endif %}
+        </select>
+      </div>
+
+      <button type="submit" id="startUploadBtn" class="btn btn-primary" style="width: 100%; margin-top: 1rem;" {% if not cdn_accounts %}disabled{% endif %}>
+        Start Upload & Processing
+      </button>
+    </form>
+  </div>
+
+  <!-- Live Status Pipeline & Logs -->
+  <div class="clay-card">
+    <div class="clay-card-header">
+      <h3 class="clay-card-title">Detailed Pipeline & Live Logs</h3>
+    </div>
+
+    <div id="pipelineContainer" style="display: none;">
+      <div style="margin-bottom: 1rem;">
+        <div style="display: flex; justify-content: space-between; font-weight: 600; font-size: 0.9rem; margin-bottom: 0.4rem;">
+          <span id="pipelineStepText">Receiving file...</span>
+          <span id="pipelineProgressText">0%</span>
+        </div>
+        <div class="progress-bar-container">
+          <div id="pipelineProgressBar" class="progress-bar-fill" style="width: 0%;"></div>
+        </div>
+      </div>
+
+      <!-- Stage Checklist -->
+      <div style="display: flex; flex-direction: column; gap: 0.4rem; font-size: 0.85rem; margin-bottom: 1.25rem;">
+        <div id="stage-receive" style="color: var(--color-muted);">[ ] Receiving & streaming to disk</div>
+        <div id="stage-inspect" style="color: var(--color-muted);">[ ] Inspecting media metadata (resolution, FPS, duration)</div>
+        <div id="stage-transcode" style="color: var(--color-muted);">[ ] Transcoding Original + Step Down HLS variants</div>
+        <div id="stage-upload-cdn" style="color: var(--color-muted);">[ ] Uploading HLS segments & playlists to CDN</div>
+        <div id="stage-verify" style="color: var(--color-muted);">[ ] Verifying remote CDN files</div>
+        <div id="stage-cleanup" style="color: var(--color-muted);">[ ] Reclaiming local server disk space</div>
+      </div>
+    </div>
+
+    <label class="form-label">Real-time Terminal Logs</label>
+    <div id="logConsole" class="log-console">
+07:41:00  Ready to accept video upload stream...
+    </div>
+  </div>
+</div>
+
+<script>
+  let activeJobId = null;
+  let logPollInterval = null;
+
+  document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    const fileInput = document.getElementById('videoFile');
+    if (!fileInput.files.length) return;
+
+    const file = fileInput.files[0];
+    const title = document.getElementById('title').value.trim() || file.name;
+    const description = document.getElementById('description').value.trim();
+    const cdnAccountId = document.getElementById('cdnSelect').value;
+
+    const btn = document.getElementById('startUploadBtn');
+    btn.disabled = true;
+    btn.textContent = 'Streaming file to disk...';
+
+    document.getElementById('pipelineContainer').style.display = 'block';
+
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('title', title);
+    formData.append('description', description);
+    formData.append('cdn_account_id', cdnAccountId);
+
+    try {
+      const resp = await fetch('/api/videos/upload', {
+        method: 'POST',
+        body: formData
+      });
+
+      const data = await resp.json();
+      if (resp.ok) {
+        activeJobId = data.job_id;
+        startLogPolling(activeJobId);
+      } else {
+        alert("Upload error: " + (data.error || "Failed to start upload"));
+        btn.disabled = false;
+        btn.textContent = 'Start Upload & Processing';
+      }
+    } catch (err) {
+      alert("Network error streaming file upload.");
+      btn.disabled = false;
+      btn.textContent = 'Start Upload & Processing';
+    }
+  });
+
+  function startLogPolling(jobId) {
+    if (logPollInterval) clearInterval(logPollInterval);
+    
+    logPollInterval = setInterval(async () => {
+      try {
+        const resp = await fetch(`/api/jobs/${jobId}/logs`);
+        if (!resp.ok) return;
+
+        const data = await resp.json();
+        const job = data.job;
+        const logs = data.logs;
+
+        // Update progress bar
+        document.getElementById('pipelineProgressBar').style.width = `${job.progress}%`;
+        document.getElementById('pipelineProgressText').textContent = `${job.progress}%`;
+        document.getElementById('pipelineStepText').textContent = job.current_step || 'Processing...';
+
+        // Update stage indicators based on progress %
+        if (job.progress >= 10) document.getElementById('stage-receive').innerHTML = '✓ Receiving & streaming to disk';
+        if (job.progress >= 20) document.getElementById('stage-inspect').innerHTML = '✓ Inspecting media metadata';
+        if (job.progress >= 55) document.getElementById('stage-transcode').innerHTML = '✓ Transcoded HLS variants';
+        if (job.progress >= 90) document.getElementById('stage-upload-cdn').innerHTML = '✓ Uploaded to CDN';
+        if (job.progress >= 95) document.getElementById('stage-verify').innerHTML = '✓ Verified CDN files';
+        if (job.progress >= 100) {
+          document.getElementById('stage-cleanup').innerHTML = '✓ Local server disk space reclaimed';
+          clearInterval(logPollInterval);
+          document.getElementById('startUploadBtn').textContent = 'Video Ready!';
+        }
+
+        // Render real logs
+        const logBox = document.getElementById('logConsole');
+        logBox.textContent = logs.map(l => l.message).join('\n');
+        logBox.scrollTop = logBox.scrollHeight;
+
+      } catch (e) {
+        console.error("Log fetch error:", e);
+      }
+    }, 1000);
+  }
+</script>
+{% endblock %}
