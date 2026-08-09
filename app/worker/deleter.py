@@ -2,6 +2,7 @@ import time
 from datetime import datetime, timezone
 from app.models import db, Video, VideoFile, Job, JobLog, CDNAccount
 from app.cdn.manager import CDNManager
+from flask import current_app
 
 def log_delete_job(job_id: str, message: str, level: str = 'INFO'):
     now = datetime.now(timezone.utc)
@@ -17,6 +18,11 @@ def log_delete_job(job_id: str, message: str, level: str = 'INFO'):
     if job:
         job.current_message = message
     db.session.commit()
+    try:
+        if current_app.config.get('LOG_TO_STDOUT', False):
+            print(f"[DELETE JOB {job_id}] {level}: {formatted_msg}")
+    except Exception:
+        pass
 
 def execute_video_deletion(job_id: str):
     """
@@ -62,8 +68,10 @@ def execute_video_deletion(job_id: str):
                     f.upload_status = 'deleted'
                     f.deleted_at = datetime.now(timezone.utc)
                     deleted_count += 1
+                    log_delete_job(job_id, f"Deleted remote file: {f.remote_path}")
                 else:
                     failed_count += 1
+                    log_delete_job(job_id, f"Failed to delete remote file (provider returned False): {f.remote_path}", level='WARNING')
             except Exception as e:
                 failed_count += 1
                 log_delete_job(job_id, f"Failed to delete remote file {f.remote_path}: {str(e)}", level='WARNING')
@@ -71,6 +79,7 @@ def execute_video_deletion(job_id: str):
             f.upload_status = 'deleted'
             f.deleted_at = datetime.now(timezone.utc)
             deleted_count += 1
+            log_delete_job(job_id, f"Marked file as deleted (no provider): {f.remote_path}")
 
         if (idx + 1) % 10 == 0 or (idx + 1) == total_files:
             job.progress = min(95.0, (deleted_count / max(1, total_files)) * 90.0)

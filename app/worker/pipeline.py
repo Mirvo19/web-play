@@ -162,9 +162,10 @@ def log_job(job_id: str, message: str, level: str = 'INFO', metadata: str = None
     if job:
         job.current_message = message
     db.session.commit()
-    # Also write job logs to stdout for debugging
+    # Optionally write job logs to stdout for debugging (controlled by config)
     try:
-        print(f"[JOB {job_id}] {level}: {formatted_msg}")
+        if current_app.config.get('LOG_TO_STDOUT', False):
+            print(f"[JOB {job_id}] {level}: {formatted_msg}")
     except Exception:
         pass
 
@@ -440,7 +441,8 @@ def execute_video_pipeline(job_id: str):
             )
             db.session.add(v_file)
             try:
-                print(f"[UPLOAD] thumbnail -> url={res.get('url')} remote_path={res.get('remote_path')} size={res.get('file_size')}")
+                if current_app.config.get('LOG_TO_STDOUT', False):
+                    print(f"[UPLOAD] thumbnail -> url={res.get('url')} remote_path={res.get('remote_path')} size={res.get('file_size')}")
             except Exception:
                 pass
             bytes_uploaded += res.get('file_size', 0)
@@ -497,7 +499,8 @@ def execute_video_pipeline(job_id: str):
                 )
                 db.session.add(v_file)
                 try:
-                    print(f"[UPLOAD] segment -> variant={target['label']} file={s_file} url={res.get('url')} remote_path={res.get('remote_path')} size={res.get('file_size')}")
+                    if current_app.config.get('LOG_TO_STDOUT', False):
+                        print(f"[UPLOAD] segment -> variant={target['label']} file={s_file} url={res.get('url')} remote_path={res.get('remote_path')} size={res.get('file_size')}")
                 except Exception:
                     pass
                 uploaded_files_count += 1
@@ -566,7 +569,8 @@ def execute_video_pipeline(job_id: str):
                 )
                 db.session.add(v_file)
                 try:
-                    print(f"[UPLOAD] playlist -> variant={target['label']} file={p_file} url={res.get('url')} remote_path={res.get('remote_path')} size={res.get('file_size')}")
+                    if current_app.config.get('LOG_TO_STDOUT', False):
+                        print(f"[UPLOAD] playlist -> variant={target['label']} file={p_file} url={res.get('url')} remote_path={res.get('remote_path')} size={res.get('file_size')}")
                 except Exception:
                     pass
                 files_processed += 1
@@ -604,7 +608,8 @@ def execute_video_pipeline(job_id: str):
         )
         db.session.add(master_v_file)
         try:
-            print(f"[UPLOAD] master -> url={master_res.get('url')} remote_path={master_res.get('remote_path')} size={master_res.get('file_size')}")
+            if current_app.config.get('LOG_TO_STDOUT', False):
+                print(f"[UPLOAD] master -> url={master_res.get('url')} remote_path={master_res.get('remote_path')} size={master_res.get('file_size')}")
         except Exception:
             pass
 
