@@ -53,8 +53,7 @@ def jobs_list():
     jobs = Job.query.order_by(Job.created_at.desc()).all()
     return render_template('jobs.html', jobs=jobs)
 
-@views_bp.route('/jobs/<job_id>')
-@views_bp.route('/jobs/<job_id>/')
+@views_bp.route('/jobs/<job_id>', strict_slashes=False)
 @login_required
 def job_detail(job_id):
     job = Job.query.get_or_404(job_id)

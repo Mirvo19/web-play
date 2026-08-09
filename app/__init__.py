@@ -20,7 +20,8 @@ def create_app(config_class=Config):
         round=round,
         min=min,
         max=max,
-        int=int
+        int=int,
+        app_version=app.config.get('APP_VERSION', 'v1.0.0-patch-1')
     )
 
     # Register Blueprints

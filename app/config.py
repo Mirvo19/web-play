@@ -37,3 +37,6 @@ class Config:
     MAX_CONCURRENT_JOBS = int(os.environ.get('MAX_CONCURRENT_JOBS', 1))
     # Whether to also echo job logs and upload events to stdout (for local debugging)
     LOG_TO_STDOUT = os.environ.get('LOG_TO_STDOUT', 'false').lower() in ('1', 'true', 'yes')
+
+    # App version metadata used in UI footers and tooltips
+    APP_VERSION = os.environ.get('APP_VERSION', 'v1.0.0-patch-1')

@@ -208,9 +208,10 @@
       const resp = await fetch(`/api/videos/${id}`, { method: 'DELETE' });
       const data = await resp.json();
       if (resp.ok) {
-        const jobUrl = data && data.job_url
+        const rawJobUrl = data && data.job_url
           ? data.job_url
           : `/jobs/${encodeURIComponent(data.job_id)}`;
+        const jobUrl = rawJobUrl.replace(/\/+$/, '');
         console.log('Delete redirect to', jobUrl);
         alert("Deletion job queued. Opening the job log so you can watch verbose delete progress.");
         window.location.href = jobUrl;
