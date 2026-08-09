@@ -1,165 +1,776 @@
 {% extends "base.html" %}
 
-{% block title %}Server Stats — Video Infrastructure Platform{% endblock %}
-{% block header_title %}Live Server Resources & Capacity Monitor{% endblock %}
+{% block title %}Server Monitoring — Video Infrastructure Platform{% endblock %}
+{% block header_title %}Live Server Resources & System Dashboard{% endblock %}
 
 {% block content %}
-<div class="grid-3" style="margin-bottom: 1.5rem;">
-  <!-- CPU Stats Card -->
-  <div class="clay-card">
-    <div class="clay-card-header">
-      <h3 class="clay-card-title">CPU Utilization</h3>
+<!-- Top Server Status Banner -->
+<div class="monitoring-header-bar">
+  <div style="display: flex; align-items: center; gap: 1.5rem;">
+    <div class="status-indicator" id="statusIndicator">
+      <div class="pulse-dot"></div>
+      <span id="statusText">ONLINE</span>
     </div>
-    <div style="font-size: 1.8rem; font-weight: 700; id='cpuPercentText'">71%</div>
-    <div class="progress-bar-container">
-      <div id="cpuProgressBar" class="progress-bar-fill" style="width: 71%;"></div>
+    <div>
+      <span style="color: var(--color-muted); font-size: 0.82rem;">Host:</span>
+      <strong id="topHostname" style="color: var(--color-text); font-family: var(--font-mono); margin-left: 0.25rem;">—</strong>
     </div>
-    <div style="font-size: 0.82rem; color: var(--color-muted); margin-top: 0.5rem;">
-      Hardware: <strong style="color: var(--color-text);">48 cores / 92 threads</strong><br>
-      FFmpeg Alloc: <span id="ffmpegThreadsText">40 threads</span>
-    </div>
-  </div>
-
-  <!-- RAM Stats Card -->
-  <div class="clay-card">
-    <div class="clay-card-header">
-      <h3 class="clay-card-title">RAM Usage</h3>
-    </div>
-    <div style="font-size: 1.8rem; font-weight: 700;" id="ramUsedText">1.21 GB</div>
-    <div class="progress-bar-container">
-      <div id="ramProgressBar" class="progress-bar-fill" style="width: 60%;"></div>
-    </div>
-    <div style="font-size: 0.82rem; color: var(--color-muted); margin-top: 0.5rem;">
-      Available: <span id="ramAvailText">790 MB</span> | Total: 2.00 GB<br>
-      Swap Used: <span id="swapUsedText">0 MB</span>
+    <div>
+      <span style="color: var(--color-muted); font-size: 0.82rem;">Uptime:</span>
+      <strong id="topUptime" style="color: var(--color-text); font-family: var(--font-mono); margin-left: 0.25rem;">—</strong>
     </div>
   </div>
 
-  <!-- Disk Stats Card -->
-  <div class="clay-card">
-    <div class="clay-card-header">
-      <h3 class="clay-card-title">Disk Storage</h3>
-    </div>
-    <div style="font-size: 1.8rem; font-weight: 700;" id="diskUsedText">8.1 GB</div>
-    <div class="progress-bar-container">
-      <div id="diskProgressBar" class="progress-bar-fill" style="width: 51%;"></div>
-    </div>
-    <div style="font-size: 0.82rem; color: var(--color-muted); margin-top: 0.5rem;">
-      Free: <span id="diskFreeText">7.9 GB</span> | Total: 16.0 GB<br>
-      Temp Video Storage: <span id="tempStorageText">0 MB</span>
+  <div style="display: flex; align-items: center; gap: 1.5rem;">
+    <div>
+      <span style="color: var(--color-muted); font-size: 0.82rem;">Load Average (1, 5, 15m):</span>
+      <span id="topLoadAvg" style="font-family: var(--font-mono); font-weight: 600; color: var(--color-accent); margin-left: 0.4rem;">0.00, 0.00, 0.00</span>
     </div>
   </div>
 </div>
 
-<div class="grid-2">
-  <!-- Capacity Calculator Card -->
+<!-- Primary Telemetry Cards with Real-time Graphs -->
+<div class="grid-2" style="margin-bottom: 1.5rem;">
+  <!-- CPU Overview & History -->
   <div class="clay-card">
     <div class="clay-card-header">
-      <h3 class="clay-card-title">CDN Capacity Calculator</h3>
+      <h3 class="clay-card-title">CPU Utilization & Real-time History</h3>
+      <span id="cpuTempBadge" class="badge badge-info" style="font-family: var(--font-mono);">Temp: —</span>
     </div>
-    <p style="font-size: 0.85rem; color: var(--color-muted); margin-bottom: 1.25rem;">
-      Estimated video streaming hours remaining based on total available CDN storage.
-    </p>
-
-    <div style="display: flex; flex-direction: column; gap: 0.75rem;">
-      <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.75rem; background-color: var(--bg-surface); border-radius: var(--radius-md); border: 1px solid var(--color-border);">
-        <div>
-          <strong style="color: var(--color-text);">1440p (2K Quality)</strong>
-          <div style="font-size: 0.75rem; color: var(--color-muted);">Estimated ~8 Mbps bitrate</div>
+    
+    <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 0.5rem;">
+      <div>
+        <div style="font-size: 2rem; font-weight: 700; font-family: var(--font-mono);" id="cpuUsageText">0.0%</div>
+        <div style="font-size: 0.8rem; color: var(--color-muted);">
+          <span id="cpuCoresText">48 Cores / 92 Threads</span> • <span id="cpuFreqText">Freq: —</span>
         </div>
-        <div style="font-family: var(--font-mono); font-size: 1.2rem; font-weight: 700; color: var(--color-accent);" id="calc1440p">~3h 12m</div>
       </div>
+      <div style="text-align: right; font-size: 0.8rem; color: var(--color-muted);">
+        FFmpeg Alloc: <strong id="ffmpegThreadsText" style="color: var(--color-text);">40 threads</strong>
+      </div>
+    </div>
 
-      <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.75rem; background-color: var(--bg-surface); border-radius: var(--radius-md); border: 1px solid var(--color-border);">
-        <div>
-          <strong style="color: var(--color-text);">1080p (Full HD)</strong>
-          <div style="font-size: 0.75rem; color: var(--color-muted);">Estimated ~4.5 Mbps bitrate</div>
-        </div>
-        <div style="font-family: var(--font-mono); font-size: 1.2rem; font-weight: 700; color: var(--color-accent);" id="calc1080p">~5h 48m</div>
-      </div>
+    <div class="progress-bar-container">
+      <div id="cpuProgressBar" class="progress-bar-fill" style="width: 0%;"></div>
+    </div>
 
-      <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.75rem; background-color: var(--bg-surface); border-radius: var(--radius-md); border: 1px solid var(--color-border);">
-        <div>
-          <strong style="color: var(--color-text);">720p (HD Quality)</strong>
-          <div style="font-size: 0.75rem; color: var(--color-muted);">Estimated ~2.5 Mbps bitrate</div>
-        </div>
-        <div style="font-family: var(--font-mono); font-size: 1.2rem; font-weight: 700; color: var(--color-accent);" id="calc720p">~11h 32m</div>
-      </div>
+    <div class="chart-container">
+      <canvas id="cpuHistoryCanvas" class="chart-canvas"></canvas>
     </div>
   </div>
 
-  <!-- Active Job FFmpeg Stats Card -->
+  <!-- RAM & Swap Overview & History -->
   <div class="clay-card">
     <div class="clay-card-header">
-      <h3 class="clay-card-title">Current FFmpeg Worker Stats</h3>
+      <h3 class="clay-card-title">Memory (RAM & Swap) Usage History</h3>
+      <span id="ramPctBadge" class="badge badge-info" style="font-family: var(--font-mono);">0.0% Used</span>
     </div>
-    
+
+    <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 0.5rem;">
+      <div>
+        <div style="font-size: 2rem; font-weight: 700; font-family: var(--font-mono);" id="ramUsedText">0.00 GB</div>
+        <div style="font-size: 0.8rem; color: var(--color-muted);">
+          Total: <span id="ramTotalText">2.00 GB</span> • Available: <span id="ramAvailText">0 MB</span>
+        </div>
+      </div>
+      <div style="text-align: right; font-size: 0.8rem; color: var(--color-muted);">
+        Swap: <span id="swapUsedText">0 MB</span> / <span id="swapTotalText">0 MB</span>
+      </div>
+    </div>
+
+    <div class="progress-bar-container">
+      <div id="ramProgressBar" class="progress-bar-fill" style="width: 0%;"></div>
+    </div>
+
+    <div class="chart-container">
+      <canvas id="ramHistoryCanvas" class="chart-canvas"></canvas>
+    </div>
+  </div>
+</div>
+
+<div class="grid-2" style="margin-bottom: 1.5rem;">
+  <!-- Network Speed & History -->
+  <div class="clay-card">
+    <div class="clay-card-header">
+      <h3 class="clay-card-title">Network Telemetry & Real-Time Transfer</h3>
+      <div style="display: flex; gap: 0.5rem;">
+        <span class="badge" style="background-color: #1e3a8a; color: #60a5fa;">↓ Down</span>
+        <span class="badge" style="background-color: #064e3b; color: #34d399;">↑ Up</span>
+      </div>
+    </div>
+
+    <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 0.5rem;">
+      <div>
+        <div style="display: flex; gap: 1.5rem;">
+          <div>
+            <div style="font-size: 0.75rem; color: var(--color-muted);">DOWNLOAD</div>
+            <div style="font-size: 1.4rem; font-weight: 700; font-family: var(--font-mono); color: #3b82f6;" id="netDownSpeed">0.0 KB/s</div>
+          </div>
+          <div>
+            <div style="font-size: 0.75rem; color: var(--color-muted);">UPLOAD</div>
+            <div style="font-size: 1.4rem; font-weight: 700; font-family: var(--font-mono); color: #10b981;" id="netUpSpeed">0.0 KB/s</div>
+          </div>
+        </div>
+      </div>
+      <div style="text-align: right; font-size: 0.78rem; color: var(--color-muted);">
+        Recv Total: <span id="netTotalRecv" style="color: var(--color-text);">0 MB</span><br>
+        Sent Total: <span id="netTotalSent" style="color: var(--color-text);">0 MB</span>
+      </div>
+    </div>
+
+    <div class="chart-container">
+      <canvas id="netHistoryCanvas" class="chart-canvas"></canvas>
+    </div>
+  </div>
+
+  <!-- Disk Storage & Mount Points -->
+  <div class="clay-card">
+    <div class="clay-card-header">
+      <h3 class="clay-card-title">Disk Storage & Video Processing Directory</h3>
+      <span id="diskPctBadge" class="badge badge-info" style="font-family: var(--font-mono);">0% Used</span>
+    </div>
+
+    <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 0.5rem;">
+      <div>
+        <div style="font-size: 2rem; font-weight: 700; font-family: var(--font-mono);" id="diskUsedText">0.0 GB</div>
+        <div style="font-size: 0.8rem; color: var(--color-muted);">
+          Free: <span id="diskFreeText">0 GB</span> | Total: <span id="diskTotalText">16 GB</span>
+        </div>
+      </div>
+      <div style="text-align: right;">
+        <div style="font-size: 0.75rem; color: var(--color-muted);">TEMP VIDEO STORAGE</div>
+        <div style="font-size: 1.1rem; font-weight: 700; font-family: var(--font-mono); color: var(--color-warning);" id="tempStorageText">0 MB</div>
+      </div>
+    </div>
+
+    <div class="progress-bar-container" style="margin-bottom: 1rem;">
+      <div id="diskProgressBar" class="progress-bar-fill" style="width: 0%;"></div>
+    </div>
+
+    <div style="font-size: 0.8rem; font-weight: 600; color: var(--color-muted); margin-bottom: 0.4rem;">
+      Mounted Filesystems:
+    </div>
+    <div id="diskMountsList" style="display: flex; flex-direction: column; gap: 0.35rem; max-height: 90px; overflow-y: auto;">
+      <!-- Mount items populated via JS -->
+    </div>
+  </div>
+</div>
+
+<!-- CPU Per-Core Utilization Grid -->
+<div class="clay-card" style="margin-bottom: 1.5rem;">
+  <div class="clay-card-header">
+    <h3 class="clay-card-title">Per-Core CPU Utilization Grid</h3>
+    <span id="coreCountSummary" style="font-size: 0.82rem; color: var(--color-muted); font-family: var(--font-mono);">48 Physical Cores / 92 Logical Threads</span>
+  </div>
+  
+  <div class="core-grid" id="cpuCoreGrid">
+    <!-- Populated dynamically by JS -->
+  </div>
+</div>
+
+<!-- HC CDN Player Infrastructure Monitoring -->
+<div class="grid-2" style="margin-bottom: 1.5rem;">
+  <!-- Active FFmpeg Transcoding Worker Stats -->
+  <div class="clay-card">
+    <div class="clay-card-header">
+      <h3 class="clay-card-title">FFmpeg Worker & Active Job Telemetry</h3>
+      <span id="activeJobBadge" class="badge badge-info">Idle</span>
+    </div>
+
     <div id="activeJobStatus">
       <div style="color: var(--color-muted); font-size: 0.9rem; text-align: center; padding: 2rem;">
         No video transcoding job currently active.
       </div>
     </div>
   </div>
+
+  <!-- Job Queue Breakdown & System Assets -->
+  <div class="clay-card">
+    <div class="clay-card-header">
+      <h3 class="clay-card-title">Queue Breakdown & Infrastructure Assets</h3>
+    </div>
+
+    <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; margin-bottom: 1.25rem;">
+      <div style="background-color: var(--bg-surface); padding: 0.85rem; border-radius: var(--radius-md); border: 1px solid var(--color-border);">
+        <div style="font-size: 0.78rem; color: var(--color-muted); text-transform: uppercase;">Job Queue States</div>
+        <div style="display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem;">
+          <span class="badge badge-info" id="cntActive">Active: 0</span>
+          <span class="badge badge-warning" id="cntQueued">Queued: 0</span>
+          <span class="badge badge-success" id="cntCompleted">Completed: 0</span>
+          <span class="badge badge-danger" id="cntFailed">Failed: 0</span>
+        </div>
+      </div>
+
+      <div style="background-color: var(--bg-surface); padding: 0.85rem; border-radius: var(--radius-md); border: 1px solid var(--color-border);">
+        <div style="font-size: 0.78rem; color: var(--color-muted); text-transform: uppercase;">Engine Capacity</div>
+        <div style="font-family: var(--font-mono); font-size: 0.88rem; margin-top: 0.4rem; color: var(--color-text);">
+          Worker Threads: <strong id="cfgThreads">40</strong><br>
+          Max Concurrent: <strong id="cfgConcurrent">1</strong>
+        </div>
+      </div>
+    </div>
+
+    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.75rem; text-align: center;">
+      <div style="background-color: var(--bg-input); padding: 0.6rem; border-radius: var(--radius-sm); border: 1px solid var(--color-border);">
+        <div style="font-size: 0.72rem; color: var(--color-muted);">VIDEOS</div>
+        <div style="font-size: 1.2rem; font-weight: 700; font-family: var(--font-mono);" id="assetVideos">0</div>
+      </div>
+      <div style="background-color: var(--bg-input); padding: 0.6rem; border-radius: var(--radius-sm); border: 1px solid var(--color-border);">
+        <div style="font-size: 0.72rem; color: var(--color-muted);">VARIANTS</div>
+        <div style="font-size: 1.2rem; font-weight: 700; font-family: var(--font-mono);" id="assetVariants">0</div>
+      </div>
+      <div style="background-color: var(--bg-input); padding: 0.6rem; border-radius: var(--radius-sm); border: 1px solid var(--color-border);">
+        <div style="font-size: 0.72rem; color: var(--color-muted);">CDN FILES</div>
+        <div style="font-size: 1.2rem; font-weight: 700; font-family: var(--font-mono);" id="assetCdnFiles">0</div>
+      </div>
+      <div style="background-color: var(--bg-input); padding: 0.6rem; border-radius: var(--radius-sm); border: 1px solid var(--color-border);">
+        <div style="font-size: 0.72rem; color: var(--color-muted);">CDN STORAGE</div>
+        <div style="font-size: 0.95rem; font-weight: 700; font-family: var(--font-mono);" id="assetCdnStorage">0 B</div>
+      </div>
+    </div>
+  </div>
 </div>
 
+<div class="grid-2" style="margin-bottom: 1.5rem;">
+  <!-- CDN Accounts & Storage Breakdown -->
+  <div class="clay-card">
+    <div class="clay-card-header">
+      <h3 class="clay-card-title">CDN Accounts & Storage Allocation</h3>
+    </div>
+    <div id="cdnAccountsList" style="display: flex; flex-direction: column; gap: 0.75rem;">
+      <!-- Populated via JS -->
+    </div>
+  </div>
+
+  <!-- CDN Streaming Capacity Calculator -->
+  <div class="clay-card">
+    <div class="clay-card-header">
+      <h3 class="clay-card-title">CDN Streaming Capacity Estimates</h3>
+    </div>
+    <p style="font-size: 0.82rem; color: var(--color-muted); margin-bottom: 1rem;">
+      Estimated streaming hours available based on total remaining CDN storage capacity across accounts.
+    </p>
+
+    <div style="display: flex; flex-direction: column; gap: 0.65rem;">
+      <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.65rem 0.85rem; background-color: var(--bg-surface); border-radius: var(--radius-md); border: 1px solid var(--color-border);">
+        <div>
+          <strong style="color: var(--color-text);">1440p (2K Resolution)</strong>
+          <div style="font-size: 0.75rem; color: var(--color-muted);">Estimated ~8.0 Mbps bitrate</div>
+        </div>
+        <div style="font-family: var(--font-mono); font-size: 1.15rem; font-weight: 700; color: var(--color-accent);" id="calc1440p">~0.0 hrs</div>
+      </div>
+
+      <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.65rem 0.85rem; background-color: var(--bg-surface); border-radius: var(--radius-md); border: 1px solid var(--color-border);">
+        <div>
+          <strong style="color: var(--color-text);">1080p (Full HD)</strong>
+          <div style="font-size: 0.75rem; color: var(--color-muted);">Estimated ~4.5 Mbps bitrate</div>
+        </div>
+        <div style="font-family: var(--font-mono); font-size: 1.15rem; font-weight: 700; color: var(--color-accent);" id="calc1080p">~0.0 hrs</div>
+      </div>
+
+      <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.65rem 0.85rem; background-color: var(--bg-surface); border-radius: var(--radius-md); border: 1px solid var(--color-border);">
+        <div>
+          <strong style="color: var(--color-text);">720p (HD Quality)</strong>
+          <div style="font-size: 0.75rem; color: var(--color-muted);">Estimated ~2.5 Mbps bitrate</div>
+        </div>
+        <div style="font-family: var(--font-mono); font-size: 1.15rem; font-weight: 700; color: var(--color-accent);" id="calc720p">~0.0 hrs</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Detailed Hardware & System Information Table -->
+<div class="clay-card">
+  <div class="clay-card-header">
+    <h3 class="clay-card-title">System Information</h3>
+  </div>
+
+  <div class="table-container">
+    <table class="clay-table" style="font-size: 0.88rem;">
+      <tbody>
+        <tr>
+          <td style="width: 20%; color: var(--color-muted); font-weight: 600;">Hostname</td>
+          <td id="sysHostname" style="font-family: var(--font-mono);">—</td>
+          <td style="width: 20%; color: var(--color-muted); font-weight: 600;">Operating System</td>
+          <td id="sysOS">—</td>
+        </tr>
+        <tr>
+          <td style="color: var(--color-muted); font-weight: 600;">Kernel Version</td>
+          <td id="sysKernel" style="font-family: var(--font-mono);">—</td>
+          <td style="color: var(--color-muted); font-weight: 600;">Architecture</td>
+          <td id="sysArch" style="font-family: var(--font-mono);">—</td>
+        </tr>
+        <tr>
+          <td style="color: var(--color-muted); font-weight: 600;">CPU Model</td>
+          <td id="sysCPUModel" style="font-family: var(--font-mono);">—</td>
+          <td style="color: var(--color-muted); font-weight: 600;">Cores / Threads</td>
+          <td id="sysCoresThreads" style="font-family: var(--font-mono);">—</td>
+        </tr>
+        <tr>
+          <td style="color: var(--color-muted); font-weight: 600;">System Uptime</td>
+          <td id="sysUptime" style="font-family: var(--font-mono);">—</td>
+          <td style="color: var(--color-muted); font-weight: 600;">Server Time</td>
+          <td id="sysTimestamp" style="font-family: var(--font-mono);">—</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
 <script>
-  async function fetchServerStats() {
-    try {
-      const resp = await fetch('/api/system/stats');
-      if (!resp.ok) return;
-      const data = await resp.json();
+  // 60-Second Real-Time Telemetry Data Buffers
+  const MAX_POINTS = 60;
+  const cpuHistory = new Array(MAX_POINTS).fill(0);
+  const ramHistory = new Array(MAX_POINTS).fill(0);
+  const netDownHistory = new Array(MAX_POINTS).fill(0);
+  const netUpHistory = new Array(MAX_POINTS).fill(0);
 
-      // CPU
-      document.getElementById('cpuProgressBar').style.width = `${data.cpu.usage_percent}%`;
+  let coreBoxes = [];
 
-      // RAM
-      const ramUsedGB = (data.ram.used_bytes / 1024 / 1024 / 1024).toFixed(2);
-      const ramAvailMB = Math.round(data.ram.available_bytes / 1024 / 1024);
-      document.getElementById('ramUsedText').textContent = `${ramUsedGB} GB`;
-      document.getElementById('ramAvailText').textContent = `${ramAvailMB} MB`;
-      document.getElementById('ramProgressBar').style.width = `${data.ram.percent}%`;
+  // Helper: Format bytes to human readable string
+  function formatBytes(bytes, decimals = 2) {
+    if (bytes === 0 || !bytes) return '0 B';
+    const k = 1024;
+    const dm = decimals < 0 ? 0 : decimals;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+  }
 
-      // Disk
-      const diskUsedGB = (data.disk.used_bytes / 1024 / 1024 / 1024).toFixed(1);
-      const diskFreeGB = (data.disk.free_bytes / 1024 / 1024 / 1024).toFixed(1);
-      const tempMB = Math.round(data.disk.temp_folder_size / 1024 / 1024);
-      document.getElementById('diskUsedText').textContent = `${diskUsedGB} GB`;
-      document.getElementById('diskFreeText').textContent = `${diskFreeGB} GB`;
-      document.getElementById('tempStorageText').textContent = `${tempMB} MB`;
-      const diskPct = Math.round((data.disk.used_bytes / data.disk.total_bytes) * 100);
-      document.getElementById('diskProgressBar').style.width = `${diskPct}%`;
+  // Helper: Format transfer speeds
+  function formatSpeed(bps) {
+    if (!bps || bps <= 0) return '0.0 KB/s';
+    if (bps >= 1024 * 1024) {
+      return (bps / (1024 * 1024)).toFixed(2) + ' MB/s';
+    }
+    return (bps / 1024).toFixed(1) + ' KB/s';
+  }
 
-      // Capacity Calculator
-      document.getElementById('calc1440p').textContent = `~${data.capacity_calculator.hours_1440p} hrs`;
-      document.getElementById('calc1080p').textContent = `~${data.capacity_calculator.hours_1080p} hrs`;
-      document.getElementById('calc720p').textContent = `~${data.capacity_calculator.hours_720p} hrs`;
+  // Helper: Format seconds to uptime string
+  function formatUptime(totalSeconds) {
+    if (!totalSeconds) return '—';
+    const days = Math.floor(totalSeconds / (3600 * 24));
+    const hours = Math.floor((totalSeconds % (3600 * 24)) / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const secs = totalSeconds % 60;
+    
+    let parts = [];
+    if (days > 0) parts.push(`${days}d`);
+    if (hours > 0 || days > 0) parts.push(`${hours}h`);
+    parts.push(`${minutes}m`);
+    if (days === 0 && hours === 0) parts.push(`${secs}s`);
+    return parts.join(' ');
+  }
 
-      // Active Job
-      const jobDiv = document.getElementById('activeJobStatus');
-      if (data.active_job) {
-        const job = data.active_job;
-        jobDiv.innerHTML = `
-          <div style="margin-bottom: 1rem;">
-            <div style="font-weight: 600; font-size: 0.95rem;">${job.current_step}</div>
-            <div style="font-size: 0.82rem; color: var(--color-muted); margin-top: 0.2rem;">${job.current_message}</div>
-          </div>
-          <div class="progress-bar-container" style="height: 12px; margin-bottom: 1rem;">
-            <div class="progress-bar-fill" style="width: ${job.progress}%;"></div>
-          </div>
-          <div style="font-family: var(--font-mono); font-size: 0.8rem; background-color: var(--bg-input); padding: 0.75rem; border-radius: var(--radius-sm); border: 1px solid var(--color-border);">
-            Progress: ${job.progress}%<br>
-            Active Threads: ${data.cpu.logical_threads || 40}
-          </div>
-        `;
-      } else {
-        jobDiv.innerHTML = `<div style="color: var(--color-muted); font-size: 0.9rem; text-align: center; padding: 2rem;">No video transcoding job currently active.</div>`;
+  // Generic High-DPI Real-Time Line Chart Renderer
+  function renderChart(canvasId, seriesData, color, strokeColor, maxValParam = null) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.scale(dpr, dpr);
+
+    const w = rect.width;
+    const h = rect.height;
+
+    ctx.clearRect(0, 0, w, h);
+
+    // Background Grid
+    ctx.strokeStyle = '#1e2638';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let y = 0; y <= h; y += h / 4) {
+      ctx.moveTo(0, y);
+      ctx.lineTo(w, y);
+    }
+    ctx.stroke();
+
+    if (!seriesData || seriesData.length === 0) return;
+
+    let maxVal = maxValParam;
+    if (maxVal === null) {
+      maxVal = Math.max(...seriesData, 10);
+    }
+
+    const step = w / (MAX_POINTS - 1);
+
+    // Fill Area
+    ctx.beginPath();
+    ctx.moveTo(0, h);
+    for (let i = 0; i < seriesData.length; i++) {
+      const x = i * step;
+      const val = Math.min(seriesData[i], maxVal);
+      const y = h - (val / maxVal) * (h - 8) - 4;
+      if (i === 0) ctx.lineTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.lineTo((seriesData.length - 1) * step, h);
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
+
+    // Line Stroke
+    ctx.beginPath();
+    for (let i = 0; i < seriesData.length; i++) {
+      const x = i * step;
+      const val = Math.min(seriesData[i], maxVal);
+      const y = h - (val / maxVal) * (h - 8) - 4;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  // Real-Time Dual Series Network Chart Renderer
+  function renderDualChart(canvasId, seriesA, seriesB, colorA, colorB) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.scale(dpr, dpr);
+
+    const w = rect.width;
+    const h = rect.height;
+
+    ctx.clearRect(0, 0, w, h);
+
+    // Background Grid
+    ctx.strokeStyle = '#1e2638';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let y = 0; y <= h; y += h / 4) {
+      ctx.moveTo(0, y);
+      ctx.lineTo(w, y);
+    }
+    ctx.stroke();
+
+    const maxVal = Math.max(...seriesA, ...seriesB, 1024 * 100); // minimum scale 100 KB/s
+    const step = w / (MAX_POINTS - 1);
+
+    function drawSeries(seriesData, strokeColor) {
+      ctx.beginPath();
+      for (let i = 0; i < seriesData.length; i++) {
+        const x = i * step;
+        const val = Math.min(seriesData[i], maxVal);
+        const y = h - (val / maxVal) * (h - 8) - 4;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
       }
-    } catch (e) {
-      console.error("Stats fetch error:", e);
+      ctx.strokeStyle = strokeColor;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+
+    drawSeries(seriesA, colorA); // Download (Blue)
+    drawSeries(seriesB, colorB); // Upload (Green)
+  }
+
+  // Initialize per-core grid elements
+  function initCoreGrid(count) {
+    const grid = document.getElementById('cpuCoreGrid');
+    grid.innerHTML = '';
+    coreBoxes = [];
+
+    for (let i = 0; i < count; i++) {
+      const box = document.createElement('div');
+      box.className = 'core-box';
+      
+      const numStr = String(i + 1).padStart(2, '0');
+      box.innerHTML = `
+        <div class="core-header">
+          <span>Core ${numStr}</span>
+          <span class="core-val" id="coreVal_${i}">0%</span>
+        </div>
+        <div class="core-bar-bg">
+          <div class="core-bar-fill" id="coreBar_${i}" style="width: 0%;"></div>
+        </div>
+      `;
+      grid.appendChild(box);
+      coreBoxes.push({
+        valEl: box.querySelector(`#coreVal_${i}`),
+        barEl: box.querySelector(`#coreBar_${i}`)
+      });
     }
   }
 
+  // Update per-core grid values
+  function updateCoreGrid(perCoreData) {
+    if (!perCoreData) return;
+    if (coreBoxes.length !== perCoreData.length) {
+      initCoreGrid(perCoreData.length);
+    }
+
+    for (let i = 0; i < perCoreData.length; i++) {
+      const pct = Math.round(perCoreData[i]);
+      const cb = coreBoxes[i];
+      if (cb) {
+        cb.valEl.textContent = `${pct}%`;
+        cb.barEl.style.width = `${pct}%`;
+        
+        // Color coding
+        if (pct > 85) {
+          cb.barEl.style.backgroundColor = 'var(--color-danger)';
+        } else if (pct > 60) {
+          cb.barEl.style.backgroundColor = 'var(--color-warning)';
+        } else {
+          cb.barEl.style.backgroundColor = 'var(--color-accent)';
+        }
+      }
+    }
+  }
+
+  // Main telemetry polling function
+  async function fetchServerStats() {
+    const statusInd = document.getElementById('statusIndicator');
+    const statusText = document.getElementById('statusText');
+
+    try {
+      const resp = await fetch('/api/system/stats');
+      if (!resp.ok) {
+        throw new Error(`HTTP error! status: ${resp.status}`);
+      }
+      const data = await resp.json();
+
+      // Mark status ONLINE
+      statusInd.className = 'status-indicator';
+      statusText.textContent = 'ONLINE';
+
+      // 1. Top Header Telemetry
+      const sys = data.system || data;
+      document.getElementById('topHostname').textContent = data.hostname || sys.hostname || '—';
+      document.getElementById('topUptime').textContent = formatUptime(data.uptime);
+      
+      const load = data.load || (data.cpu ? data.cpu.load_avg : [0,0,0]);
+      if (load && load.length >= 3) {
+        document.getElementById('topLoadAvg').textContent = `${load[0].toFixed(2)}, ${load[1].toFixed(2)}, ${load[2].toFixed(2)}`;
+      }
+
+      // 2. CPU Telemetry
+      const cpu = data.cpu || {};
+      const cpuPct = cpu.usage_percent !== undefined ? cpu.usage_percent : 0;
+      document.getElementById('cpuUsageText').textContent = `${cpuPct.toFixed(1)}%`;
+      document.getElementById('cpuProgressBar').style.width = `${cpuPct}%`;
+      
+      const tempBadge = document.getElementById('cpuTempBadge');
+      if (cpu.temperature !== null && cpu.temperature !== undefined) {
+        tempBadge.textContent = `Temp: ${cpu.temperature}°C`;
+        tempBadge.className = cpu.temperature > 80 ? 'badge badge-danger' : 'badge badge-info';
+      } else {
+        tempBadge.textContent = 'Temp: N/A';
+        tempBadge.className = 'badge';
+        tempBadge.style.backgroundColor = 'var(--bg-surface)';
+        tempBadge.style.color = 'var(--color-muted)';
+      }
+
+      const freqText = cpu.frequency_mhz ? `${cpu.frequency_mhz} MHz` : 'N/A';
+      document.getElementById('cpuFreqText').textContent = `Freq: ${freqText}`;
+      
+      const physical = cpu.physical_cores || cpu.cores || 48;
+      const logical = cpu.logical_threads || cpu.threads || 92;
+      document.getElementById('cpuCoresText').textContent = `${physical} Cores / ${logical} Threads`;
+      document.getElementById('coreCountSummary').textContent = `${physical} Physical Cores / ${logical} Logical Threads`;
+
+      // Update CPU History Buffer & Chart
+      cpuHistory.push(cpuPct);
+      if (cpuHistory.length > MAX_POINTS) cpuHistory.shift();
+      renderChart('cpuHistoryCanvas', cpuHistory, 'rgba(59, 130, 246, 0.15)', '#3b82f6', 100);
+
+      // Update CPU Core Grid
+      if (cpu.per_core) {
+        updateCoreGrid(cpu.per_core);
+      }
+
+      // 3. RAM Telemetry
+      const ram = data.ram || {};
+      const ramUsedGB = ((ram.used_bytes || 0) / (1024 * 1024 * 1024)).toFixed(2);
+      const ramTotalGB = ((ram.total_bytes || 0) / (1024 * 1024 * 1024)).toFixed(2);
+      const ramAvail = formatBytes(ram.available_bytes || 0);
+      const ramPct = ram.usage_percent !== undefined ? ram.usage_percent : (ram.percent || 0);
+
+      document.getElementById('ramUsedText').textContent = `${ramUsedGB} GB`;
+      document.getElementById('ramTotalText').textContent = `${ramTotalGB} GB`;
+      document.getElementById('ramAvailText').textContent = ramAvail;
+      document.getElementById('ramProgressBar').style.width = `${ramPct}%`;
+      document.getElementById('ramPctBadge').textContent = `${ramPct.toFixed(1)}% Used`;
+      
+      document.getElementById('swapUsedText').textContent = formatBytes(ram.swap_used || 0);
+      document.getElementById('swapTotalText').textContent = formatBytes(ram.swap_total || 0);
+
+      // Update RAM History Buffer & Chart
+      ramHistory.push(ramPct);
+      if (ramHistory.length > MAX_POINTS) ramHistory.shift();
+      renderChart('ramHistoryCanvas', ramHistory, 'rgba(168, 85, 247, 0.15)', '#a855f7', 100);
+
+      // 4. Network Telemetry
+      const net = data.network || {};
+      const downSpeedBps = net.download_speed_bps !== undefined ? net.download_speed_bps : ((net.download || 0) * 1024 * 1024);
+      const upSpeedBps = net.upload_speed_bps !== undefined ? net.upload_speed_bps : ((net.upload || 0) * 1024 * 1024);
+
+      document.getElementById('netDownSpeed').textContent = formatSpeed(downSpeedBps);
+      document.getElementById('netUpSpeed').textContent = formatSpeed(upSpeedBps);
+      document.getElementById('netTotalRecv').textContent = formatBytes(net.total_received_bytes || net.total_received || 0);
+      document.getElementById('netTotalSent').textContent = formatBytes(net.total_sent_bytes || net.total_sent || 0);
+
+      // Update Network History Buffer & Chart
+      netDownHistory.push(downSpeedBps);
+      if (netDownHistory.length > MAX_POINTS) netDownHistory.shift();
+      netUpHistory.push(upSpeedBps);
+      if (netUpHistory.length > MAX_POINTS) netUpHistory.shift();
+      renderDualChart('netHistoryCanvas', netDownHistory, netUpHistory, '#3b82f6', '#10b981');
+
+      // 5. Disk & Mount Points Telemetry
+      const disk = data.disk || {};
+      const diskUsedGB = ((disk.used_bytes || 0) / (1024 * 1024 * 1024)).toFixed(1);
+      const diskFreeGB = ((disk.free_bytes || 0) / (1024 * 1024 * 1024)).toFixed(1);
+      const diskTotalGB = ((disk.total_bytes || 0) / (1024 * 1024 * 1024)).toFixed(1);
+      const diskPct = disk.usage_percent !== undefined ? disk.usage_percent : Math.round(((disk.used_bytes || 0) / (disk.total_bytes || 1)) * 100);
+
+      document.getElementById('diskUsedText').textContent = `${diskUsedGB} GB`;
+      document.getElementById('diskFreeText').textContent = `${diskFreeGB} GB`;
+      document.getElementById('diskTotalText').textContent = `${diskTotalGB} GB`;
+      document.getElementById('diskProgressBar').style.width = `${diskPct}%`;
+      document.getElementById('diskPctBadge').textContent = `${diskPct.toFixed(1)}% Used`;
+      
+      const tempStorageBytes = disk.temp_storage_bytes !== undefined ? disk.temp_storage_bytes : (disk.temp_folder_size || 0);
+      document.getElementById('tempStorageText').textContent = formatBytes(tempStorageBytes);
+
+      // Mount points list
+      const mountsDiv = document.getElementById('diskMountsList');
+      if (disk.mounts && disk.mounts.length > 0) {
+        mountsDiv.innerHTML = disk.mounts.map(m => `
+          <div style="display: flex; justify-content: space-between; font-size: 0.78rem; font-family: var(--font-mono); background-color: var(--bg-input); padding: 0.25rem 0.5rem; border-radius: var(--radius-sm); border: 1px solid var(--color-border);">
+            <span>${m.mount} (${m.fstype})</span>
+            <span style="color: var(--color-muted);">${formatBytes(m.used_bytes)} / ${formatBytes(m.total_bytes)} (${m.usage_percent}%)</span>
+          </div>
+        `).join('');
+      } else {
+        mountsDiv.innerHTML = `<div style="font-size: 0.78rem; color: var(--color-muted); font-family: var(--font-mono);">Mount: / (${diskTotalGB} GB total)</div>`;
+      }
+
+      // 6. Application Worker & Queue Stats
+      const player = data.player || {};
+      const activeJob = player.active_job || data.active_job;
+      const jobDiv = document.getElementById('activeJobStatus');
+      const activeJobBadge = document.getElementById('activeJobBadge');
+
+      if (activeJob) {
+        activeJobBadge.textContent = 'Processing';
+        activeJobBadge.className = 'badge badge-warning';
+        
+        const videoTitle = activeJob.video_title ? `<div style="font-size: 0.85rem; color: var(--color-accent); font-weight: 600; margin-bottom: 0.2rem;">Video: ${activeJob.video_title}</div>` : '';
+        const elapsed = activeJob.elapsed_seconds ? ` • Elapsed: ${activeJob.elapsed_seconds}s` : '';
+
+        jobDiv.innerHTML = `
+          ${videoTitle}
+          <div style="margin-bottom: 0.75rem;">
+            <div style="font-weight: 600; font-size: 0.95rem;">${activeJob.current_step || 'Processing'}</div>
+            <div style="font-size: 0.82rem; color: var(--color-muted); margin-top: 0.2rem;">${activeJob.current_message || ''}</div>
+          </div>
+          <div class="progress-bar-container" style="height: 10px; margin-bottom: 0.75rem;">
+            <div class="progress-bar-fill" style="width: ${activeJob.progress || 0}%;"></div>
+          </div>
+          <div style="font-family: var(--font-mono); font-size: 0.8rem; background-color: var(--bg-input); padding: 0.6rem; border-radius: var(--radius-sm); border: 1px solid var(--color-border); display: flex; justify-content: space-between;">
+            <span>Progress: ${(activeJob.progress || 0).toFixed(1)}%${elapsed}</span>
+            <span>Type: ${activeJob.job_type || 'transcode'}</span>
+          </div>
+        `;
+      } else {
+        activeJobBadge.textContent = 'Idle';
+        activeJobBadge.className = 'badge badge-info';
+        jobDiv.innerHTML = `<div style="color: var(--color-muted); font-size: 0.9rem; text-align: center; padding: 2rem;">No video transcoding job currently active.</div>`;
+      }
+
+      // Queue State Badges
+      const jobs = player.jobs || {};
+      document.getElementById('cntActive').textContent = `Active: ${jobs.active || 0}`;
+      document.getElementById('cntQueued').textContent = `Queued: ${jobs.queued || 0}`;
+      document.getElementById('cntCompleted').textContent = `Completed: ${jobs.completed || 0}`;
+      document.getElementById('cntFailed').textContent = `Failed: ${jobs.failed || 0}`;
+
+      // Config Threads
+      const ffmpegCfg = player.ffmpeg_config || {};
+      document.getElementById('cfgThreads').textContent = ffmpegCfg.ffmpeg_threads || '40';
+      document.getElementById('ffmpegThreadsText').textContent = `${ffmpegCfg.ffmpeg_threads || '40'} threads`;
+      document.getElementById('cfgConcurrent').textContent = ffmpegCfg.max_concurrent_jobs || '1';
+
+      // Asset Counters
+      const assets = player.stats || {};
+      document.getElementById('assetVideos').textContent = assets.video_count || 0;
+      document.getElementById('assetVariants').textContent = assets.variant_count || 0;
+      document.getElementById('assetCdnFiles').textContent = assets.cdn_file_count || 0;
+      document.getElementById('assetCdnStorage').textContent = formatBytes(assets.cdn_storage_used_bytes || 0);
+
+      // 7. CDN Accounts & Capacity
+      const cdnAccounts = player.cdn_accounts || data.cdn_accounts || [];
+      const cdnListDiv = document.getElementById('cdnAccountsList');
+      if (cdnAccounts.length > 0) {
+        cdnListDiv.innerHTML = cdnAccounts.map(acc => {
+          const st = acc.storage || {};
+          const usedStr = formatBytes(st.used_bytes || 0);
+          const totalStr = formatBytes(st.total_bytes || 0);
+          const pct = st.total_bytes ? Math.round(((st.used_bytes || 0) / st.total_bytes) * 100) : 0;
+          return `
+            <div style="padding: 0.75rem; background-color: var(--bg-surface); border-radius: var(--radius-md); border: 1px solid var(--color-border);">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem;">
+                <div>
+                  <strong style="color: var(--color-text);">${acc.name}</strong>
+                  <span style="font-size: 0.78rem; color: var(--color-muted); margin-left: 0.4rem;">(${acc.provider})</span>
+                </div>
+                <span class="badge ${acc.enabled ? 'badge-success' : 'badge-danger'}">${acc.enabled ? 'Enabled' : 'Disabled'}</span>
+              </div>
+              <div style="font-size: 0.8rem; color: var(--color-muted); font-family: var(--font-mono); margin-bottom: 0.3rem;">
+                Storage: ${usedStr} / ${totalStr} (${pct}%)
+              </div>
+              <div class="progress-bar-container" style="height: 6px;">
+                <div class="progress-bar-fill" style="width: ${pct}%;"></div>
+              </div>
+            </div>
+          `;
+        }).join('');
+      } else {
+        cdnListDiv.innerHTML = `<div style="color: var(--color-muted); font-size: 0.85rem; text-align: center; padding: 1rem;">No CDN accounts configured.</div>`;
+      }
+
+      // Capacity Calculator
+      const calc = player.capacity_calculator || data.capacity_calculator || {};
+      document.getElementById('calc1440p').textContent = `~${calc.hours_1440p || 0} hrs`;
+      document.getElementById('calc1080p').textContent = `~${calc.hours_1080p || 0} hrs`;
+      document.getElementById('calc720p').textContent = `~${calc.hours_720p || 0} hrs`;
+
+      // 8. System Information Table
+      document.getElementById('sysHostname').textContent = data.hostname || sys.hostname || '—';
+      document.getElementById('sysOS').textContent = data.os || sys.os || 'Linux';
+      document.getElementById('sysKernel').textContent = data.kernel || sys.kernel || '—';
+      document.getElementById('sysArch').textContent = data.arch || sys.arch || 'x86_64';
+      document.getElementById('sysCPUModel').textContent = data.cpu_model || sys.cpu_model || 'AMD EPYC 9454P';
+      document.getElementById('sysCoresThreads').textContent = `${physical} Cores / ${logical} Threads`;
+      document.getElementById('sysUptime').textContent = formatUptime(data.uptime);
+      document.getElementById('sysTimestamp').textContent = data.timestamp ? new Date(data.timestamp * 1000).toLocaleString() : new Date().toLocaleString();
+
+    } catch (e) {
+      console.warn("Stats fetch warning (retaining last valid telemetry):", e);
+      statusInd.className = 'status-indicator offline';
+      statusText.textContent = 'RETRYING...';
+    }
+  }
+
+  // Initial setup & start 1.5 second live polling interval
+  initCoreGrid(48); // default placeholder until API returns exact core count
   fetchServerStats();
-  setInterval(fetchServerStats, 3000);
+  setInterval(fetchServerStats, 1500);
 </script>
 {% endblock %}
+

@@ -1,11 +1,14 @@
 import os
 import shutil
 import psutil
+import time
+import platform
+import socket
 from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify, current_app
 from werkzeug.utils import secure_filename
 from app.auth import login_required
-from app.models import db, Video, Job, CDNAccount, Setting, JobLog, StorageSnapshot
+from app.models import db, Video, VideoVariant, VideoFile, Job, CDNAccount, Setting, JobLog, StorageSnapshot
 from app.cdn.manager import CDNManager
 
 api_bp = Blueprint('api', __name__, url_prefix='/api')
@@ -180,43 +183,256 @@ def get_job_logs(job_id):
     })
 
 
+# Module-level caches and state for stats monitoring
+_cached_static_sys_info = None
+_last_net_io = None
+_last_net_time = None
+_last_temp_size = 0
+_last_temp_time = 0
+
+def get_static_sys_info():
+    global _cached_static_sys_info
+    if _cached_static_sys_info is not None:
+        return _cached_static_sys_info
+
+    hostname = socket.gethostname() or platform.node() or "unknown"
+    kernel = platform.release() or "Linux"
+    arch = platform.machine() or "x86_64"
+    
+    os_name = f"{platform.system()} {platform.release()}"
+    if os.path.exists("/etc/os-release"):
+        try:
+            with open("/etc/os-release", "r") as f:
+                info = {}
+                for line in f:
+                    if "=" in line:
+                        k, v = line.strip().split("=", 1)
+                        info[k] = v.strip('"')
+                if "PRETTY_NAME" in info:
+                    os_name = info["PRETTY_NAME"]
+        except Exception:
+            pass
+
+    cpu_model = "Unknown Processor"
+    if platform.system() == "Linux" and os.path.exists("/proc/cpuinfo"):
+        try:
+            with open("/proc/cpuinfo", "r") as f:
+                for line in f:
+                    if "model name" in line:
+                        cpu_model = line.split(":", 1)[1].strip()
+                        break
+        except Exception:
+            pass
+    if cpu_model == "Unknown Processor":
+        cpu_model = platform.processor() or "x86_64 Processor"
+
+    physical_cores = psutil.cpu_count(logical=False) or 48
+    logical_threads = psutil.cpu_count(logical=True) or 92
+
+    _cached_static_sys_info = {
+        'hostname': hostname,
+        'os': os_name,
+        'kernel': kernel,
+        'arch': arch,
+        'cpu_model': cpu_model,
+        'physical_cores': physical_cores,
+        'logical_threads': logical_threads
+    }
+    return _cached_static_sys_info
+
+
+def calculate_network_speeds():
+    global _last_net_io, _last_net_time
+    now = time.time()
+    try:
+        net_io = psutil.net_io_counters()
+    except Exception:
+        return {
+            'download_speed_bps': 0.0,
+            'upload_speed_bps': 0.0,
+            'total_received_bytes': 0,
+            'total_sent_bytes': 0
+        }
+
+    if _last_net_io is None or _last_net_time is None:
+        download_speed = 0.0
+        upload_speed = 0.0
+    else:
+        dt = max(now - _last_net_time, 0.001)
+        download_diff = max(0, net_io.bytes_recv - _last_net_io.bytes_recv)
+        upload_diff = max(0, net_io.bytes_sent - _last_net_io.bytes_sent)
+        download_speed = download_diff / dt
+        upload_speed = upload_diff / dt
+
+    _last_net_io = net_io
+    _last_net_time = now
+
+    return {
+        'download_speed_bps': round(download_speed, 2),
+        'upload_speed_bps': round(upload_speed, 2),
+        'total_received_bytes': net_io.bytes_recv,
+        'total_sent_bytes': net_io.bytes_sent
+    }
+
+
+def get_cpu_temperature():
+    try:
+        if hasattr(psutil, "sensors_temperatures"):
+            temps = psutil.sensors_temperatures()
+            if temps:
+                for key in ('coretemp', 'k10temp', 'cpu_thermal', 'zenpower', 'acpitz'):
+                    if key in temps and temps[key]:
+                        for sensor in temps[key]:
+                            if hasattr(sensor, 'current') and sensor.current is not None and sensor.current > 0:
+                                return round(sensor.current, 1)
+                for entries in temps.values():
+                    for sensor in entries:
+                        if hasattr(sensor, 'current') and sensor.current is not None and sensor.current > 0:
+                            return round(sensor.current, 1)
+    except Exception:
+        pass
+    return None
+
+
+def get_cpu_frequency():
+    try:
+        freq = psutil.cpu_freq()
+        if freq and getattr(freq, 'current', None):
+            return round(freq.current, 1)
+    except Exception:
+        pass
+    return None
+
+
+def get_load_averages():
+    try:
+        if hasattr(os, "getloadavg"):
+            loads = os.getloadavg()
+            return [round(l, 2) for l in loads]
+        elif hasattr(psutil, "getloadavg"):
+            loads = psutil.getloadavg()
+            return [round(l, 2) for l in loads]
+    except Exception:
+        pass
+    return [0.0, 0.0, 0.0]
+
+
+def get_cached_temp_folder_size(upload_folder):
+    global _last_temp_size, _last_temp_time
+    now = time.time()
+    if now - _last_temp_time < 10:
+        return _last_temp_size
+
+    total = 0
+    if os.path.exists(upload_folder):
+        try:
+            for root, _, files in os.walk(upload_folder):
+                for f in files:
+                    try:
+                        total += os.path.getsize(os.path.join(root, f))
+                    except OSError:
+                        pass
+        except Exception:
+            pass
+
+    _last_temp_size = total
+    _last_temp_time = now
+    return total
+
+
+def get_disk_mounts():
+    mounts = []
+    try:
+        partitions = psutil.disk_partitions(all=False)
+        seen = set()
+        for p in partitions:
+            if p.fstype in ('squashfs', 'iso9660', 'tmpfs', 'devtmpfs') or 'loop' in p.device:
+                continue
+            if p.mountpoint in seen:
+                continue
+            try:
+                usage = psutil.disk_usage(p.mountpoint)
+                seen.add(p.mountpoint)
+                mounts.append({
+                    'mount': p.mountpoint,
+                    'device': p.device,
+                    'fstype': p.fstype,
+                    'total_bytes': usage.total,
+                    'used_bytes': usage.used,
+                    'free_bytes': usage.free,
+                    'usage_percent': usage.percent
+                })
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return mounts
+
+
 @api_bp.route('/system/stats', methods=['GET'])
 @login_required
 def get_system_stats():
     """
-    Live server resource monitoring for 48 cores / 92 threads, 2 GB RAM, 16 GB Disk.
+    Live server resource and application monitoring endpoint.
     """
+    sys_info = get_static_sys_info()
+    now_ts = time.time()
+    boot_time = psutil.boot_time() if hasattr(psutil, 'boot_time') else now_ts
+    uptime_sec = max(0, int(now_ts - boot_time))
+
     # CPU Stats
     cpu_percent = psutil.cpu_percent(interval=None)
-    physical_cores = psutil.cpu_count(logical=False) or 48
-    logical_threads = psutil.cpu_count(logical=True) or 92
-    per_cpu = psutil.cpu_percent(percpu=True) or []
+    per_core = psutil.cpu_percent(percpu=True) or []
+    cpu_temp = get_cpu_temperature()
+    cpu_freq = get_cpu_frequency()
+    load_avg = get_load_averages()
 
-    # RAM Stats
+    # RAM & Swap Stats
     ram = psutil.virtual_memory()
     swap = psutil.swap_memory()
 
     # Disk Stats
     upload_folder = current_app.config.get('UPLOAD_FOLDER', '/tmp/video-processing')
     os.makedirs(upload_folder, exist_ok=True)
-    disk = shutil.disk_usage(upload_folder)
+    main_disk = shutil.disk_usage(upload_folder)
+    temp_folder_size = get_cached_temp_folder_size(upload_folder)
+    disk_mounts = get_disk_mounts()
 
-    temp_folder_size = 0
-    if os.path.exists(upload_folder):
-        for root, dirs, files in os.walk(upload_folder):
-            temp_folder_size += sum(os.path.getsize(os.path.join(root, name)) for name in files)
+    # Network Speeds
+    net_stats = calculate_network_speeds()
 
-    # Active FFmpeg Job Stats
-    active_job = Job.query.filter_by(status='processing').first()
-    active_job_data = active_job.to_dict(include_logs=True) if active_job else None
+    # Active Job & Queue Stats
+    active_jobs_count = Job.query.filter_by(status='processing').count()
+    queued_jobs_count = Job.query.filter_by(status='queued').count()
+    completed_jobs_count = Job.query.filter_by(status='completed').count()
+    failed_jobs_count = Job.query.filter_by(status='failed').count()
+    total_jobs_count = Job.query.count()
 
-    # CDN Accounts Breakdown
+    active_job = Job.query.filter_by(status='processing').order_by(Job.started_at.desc()).first()
+    active_job_data = None
+    if active_job:
+        active_job_data = active_job.to_dict(include_logs=False)
+        if active_job.video:
+            active_job_data['video_title'] = active_job.video.title
+        if active_job.started_at:
+            started_ts = active_job.started_at.timestamp()
+            active_job_data['elapsed_seconds'] = round(max(0, now_ts - started_ts), 1)
+
+    # Settings
+    ffmpeg_threads = Setting.get('ffmpeg_threads', str(current_app.config.get('DEFAULT_FFMPEG_THREADS', 40)))
+    max_concurrent = Setting.get('max_concurrent_jobs', str(current_app.config.get('MAX_CONCURRENT_JOBS', 1)))
+
+    # Assets & CDN
+    video_count = Video.query.count()
+    variant_count = VideoVariant.query.count()
+    cdn_file_count = VideoFile.query.count()
+    cdn_storage_used = sum(f.file_size or 0 for f in VideoFile.query.filter_by(upload_status='uploaded').all())
+
     cdn_accounts = CDNAccount.query.filter_by(enabled=True).all()
     cdn_stats = [acc.to_dict(include_storage=True) for acc in cdn_accounts]
-
     total_avail_cdn_bytes = sum(acc['storage']['available_bytes'] for acc in cdn_stats)
 
-    # Capacity Calculator Estimates (based on standard bitrates: 1440p ~8Mbps, 1080p ~4.5Mbps, 720p ~2.5Mbps)
+    # Capacity Calculator (based on standard bitrates: 1440p ~8Mbps, 1080p ~4.5Mbps, 720p ~2.5Mbps)
     capacity_calc = {
         'hours_1440p': round(total_avail_cdn_bytes / (8 * 1000 * 1000 / 8 * 3600), 1),
         'hours_1080p': round(total_avail_cdn_bytes / (4.5 * 1000 * 1000 / 8 * 3600), 1),
@@ -224,26 +440,83 @@ def get_system_stats():
     }
 
     return jsonify({
+        'hostname': sys_info['hostname'],
+        'os': sys_info['os'],
+        'kernel': sys_info['kernel'],
+        'arch': sys_info['arch'],
+        'cpu_model': sys_info['cpu_model'],
+        'uptime': uptime_sec,
+        'load': load_avg,
+        'timestamp': int(now_ts),
+
         'cpu': {
             'usage_percent': cpu_percent,
-            'physical_cores': physical_cores,
-            'logical_threads': logical_threads,
-            'per_core': per_cpu[:12]  # return summary of core load
+            'cores': sys_info['physical_cores'],
+            'threads': sys_info['logical_threads'],
+            'physical_cores': sys_info['physical_cores'],
+            'logical_threads': sys_info['logical_threads'],
+            'temperature': cpu_temp,
+            'frequency_mhz': cpu_freq,
+            'per_core': per_core,
+            'load_avg': load_avg
         },
+
         'ram': {
             'total_bytes': ram.total,
             'used_bytes': ram.used,
             'available_bytes': ram.available,
             'percent': ram.percent,
+            'usage_percent': ram.percent,
             'swap_used': swap.used,
-            'swap_total': swap.total
+            'swap_total': swap.total,
+            'swap_percent': swap.percent
         },
+
         'disk': {
-            'total_bytes': disk.total,
-            'used_bytes': disk.used,
-            'free_bytes': disk.free,
-            'temp_folder_size': temp_folder_size
+            'total_bytes': main_disk.total,
+            'used_bytes': main_disk.used,
+            'free_bytes': main_disk.free,
+            'usage_percent': round((main_disk.used / main_disk.total) * 100, 1) if main_disk.total else 0.0,
+            'temp_folder_size': temp_folder_size,
+            'temp_storage_bytes': temp_folder_size,
+            'mounts': disk_mounts
         },
+
+        'network': {
+            'download_speed_bps': net_stats['download_speed_bps'],
+            'upload_speed_bps': net_stats['upload_speed_bps'],
+            'download': round(net_stats['download_speed_bps'] / (1024 * 1024), 2),
+            'upload': round(net_stats['upload_speed_bps'] / (1024 * 1024), 2),
+            'total_received': net_stats['total_received_bytes'],
+            'total_sent': net_stats['total_sent_bytes'],
+            'total_received_bytes': net_stats['total_received_bytes'],
+            'total_sent_bytes': net_stats['total_sent_bytes']
+        },
+
+        'player': {
+            'jobs': {
+                'active': active_jobs_count,
+                'queued': queued_jobs_count,
+                'completed': completed_jobs_count,
+                'failed': failed_jobs_count,
+                'total': total_jobs_count
+            },
+            'active_job': active_job_data,
+            'ffmpeg_config': {
+                'ffmpeg_threads': ffmpeg_threads,
+                'max_concurrent_jobs': max_concurrent,
+                'active_ffmpeg_jobs': active_jobs_count
+            },
+            'stats': {
+                'video_count': video_count,
+                'variant_count': variant_count,
+                'cdn_file_count': cdn_file_count,
+                'cdn_storage_used_bytes': cdn_storage_used
+            },
+            'cdn_accounts': cdn_stats,
+            'capacity_calculator': capacity_calc
+        },
+
         'active_job': active_job_data,
         'cdn_accounts': cdn_stats,
         'capacity_calculator': capacity_calc
