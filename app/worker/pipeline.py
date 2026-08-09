@@ -438,6 +438,7 @@ def execute_video_pipeline(job_id: str):
 
         # Upload Variants
         variant_master_urls = {}
+        variant_segment_urls = {}
         files_processed = 0
         for target, v_dir, playlist_file in variant_dirs:
             if not os.path.exists(v_dir):
@@ -467,6 +468,9 @@ def execute_video_pipeline(job_id: str):
                 if controller.should_cancel():
                     raise JobCancelled()
                 res = cdn_provider.upload_file(s_path, remote_name)
+                # Record CDN URL for this segment so we can rewrite variant
+                # playlists to point at the absolute segment URLs later.
+                variant_segment_urls.setdefault(target['label'], {})[s_file] = res['url']
                 v_file = VideoFile(
                     video_id=video.id,
                     video_variant_id=v_record.id,
@@ -488,18 +492,44 @@ def execute_video_pipeline(job_id: str):
                     update_job_progress(job_id, f"Uploading segments to CDN", prog)
                     log_job(job_id, f"Uploaded {files_processed} / {total_files_to_upload} files to CDN")
 
-            # Upload variant playlist.m3u8
+            # Upload variant playlist.m3u8 — but first rewrite segment URIs to
+            # absolute CDN URLs (some providers return non-hierarchical URLs
+            # so relative references inside playlists would 404).
             for p_file in playlist_files:
                 p_path = os.path.join(v_dir, p_file)
                 remote_name = f"{video.id}/{target['label']}/{p_file}"
                 if controller.should_cancel():
                     raise JobCancelled()
-                update_job_progress(job_id, f"Uploading to CDN — playlist {target['label']}", 55.0 + (30.0 * (bytes_uploaded / max(1, total_bytes_to_upload))))
-                res = cdn_provider.upload_file(p_path, remote_name)
+                update_job_progress(job_id, f"Uploading to CDN — playlist {target['label']}", 55.0 + (30.0 * (bytes_uploaded / max(1, total_files_to_upload))))
+
+                # Read original playlist and replace segment filenames with
+                # their uploaded CDN URLs when available.
+                try:
+                    with open(p_path, 'r', encoding='utf-8') as pf:
+                        lines = pf.readlines()
+                except Exception:
+                    lines = []
+
+                seg_map = variant_segment_urls.get(target['label'], {})
+                rewritten_path = p_path + '.cdn'
+                try:
+                    with open(rewritten_path, 'w', encoding='utf-8') as wf:
+                        for line in lines:
+                            stripped = line.strip()
+                            if stripped and not stripped.startswith('#'):
+                                # Replace with absolute URL if we have it
+                                replacement = seg_map.get(stripped, stripped)
+                                wf.write(f"{replacement}\n")
+                            else:
+                                wf.write(line)
+                    upload_path = rewritten_path
+                except Exception:
+                    upload_path = p_path
+
+                res = cdn_provider.upload_file(upload_path, remote_name)
                 v_record.playlist_url = res['url']
-                # Record the uploaded variant playlist URL so we can reference
-                # absolute CDN URLs from the master playlist (avoids broken
-                # relative paths on providers that return flat IDs/URLs)
+                # Record the uploaded variant playlist URL so master can
+                # reference absolute playlist URLs.
                 variant_master_urls[target['label']] = res['url']
                 v_file = VideoFile(
                     video_id=video.id,
