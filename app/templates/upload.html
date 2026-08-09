@@ -279,6 +279,14 @@
           cancelBtn.disabled = true;
           showToast({ type: 'success', title: 'Job completed', message: 'Processing finished successfully' });
           if (uploadToastId) closeToast(uploadToastId);
+          // Mark the final pipeline stage as completed in the UI
+          try {
+            const finalEl = document.querySelector('#stage-complete');
+            if (finalEl) {
+              finalEl.setAttribute('data-state', 'completed');
+              finalEl.textContent = '✓ ' + finalEl.textContent.replace(/^[\[\]\s✓→!]+/, '').trim();
+            }
+          } catch (e) {}
           clearInterval(logPollInterval);
           localStorage.removeItem('hc_active_job_id');
         } else if (job.status === 'failed') {
@@ -326,6 +334,7 @@
         markIf('#stage-upload-cdn', (logsTxt) => /CDN upload complete/i.test(logsTxt) || /Uploaded segment/i.test(logsTxt));
         markIf('#stage-verify', (logsTxt) => /Verified master playlist/i.test(logsTxt));
         markIf('#stage-cleanup', (logsTxt) => /Local source deleted|Local HLS files deleted|Temporary directory removed/i.test(logsTxt));
+        markIf('#stage-complete', (logsTxt, jobObj) => /Video is now fully hosted on CDN/i.test(logsTxt) || jobObj && jobObj.status === 'completed');
 
         const logBox = document.getElementById('logConsole');
         logBox.textContent = logs.map(l => l.message).join('\n');
