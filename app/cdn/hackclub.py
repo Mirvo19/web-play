@@ -1,6 +1,7 @@
 import os
 import requests
 from typing import Dict, Any, Tuple
+from urllib.parse import quote, urlparse
 from app.cdn.base import CDNProvider
 
 class HackClubCDNProvider(CDNProvider):
@@ -70,7 +71,9 @@ class HackClubCDNProvider(CDNProvider):
             if not cdn_url:
                 raise RuntimeError(f"Upload succeeded but no URL in CDN response: {response.text}")
 
-            remote_path = data.get("id") or data.get("key") or os.path.basename(cdn_url)
+            remote_path = data.get("id") or data.get("key")
+            if not remote_path:
+                remote_path = urlparse(cdn_url).path.lstrip('/')
 
             return {
                 "url": cdn_url,
@@ -86,8 +89,12 @@ class HackClubCDNProvider(CDNProvider):
 
         headers = {"Authorization": f"Bearer {self.api_key}"}
         
-        # Extract file ID or basename
-        file_id = remote_path_or_url.split("/")[-1]
+        # Extract file ID or full path from the saved remote path or public URL.
+        if remote_path_or_url.startswith('http'):
+            parsed = urlparse(remote_path_or_url)
+            file_id = parsed.path.lstrip('/')
+        else:
+            file_id = remote_path_or_url.lstrip('/')
 
         tried = []
 
