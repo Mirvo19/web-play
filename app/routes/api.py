@@ -259,7 +259,8 @@ def delete_video_api(video_id):
 
     return jsonify({
         'message': 'Video deletion queued successfully',
-        'job_id': job.id
+        'job_id': job.id,
+        'job_url': url_for('views.job_detail', job_id=job.id)
     }), 202
 
 
