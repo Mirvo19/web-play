@@ -284,6 +284,31 @@ def cancel_job_api(job_id):
     }), 200
 
 
+@api_bp.route('/cdn-accounts', methods=['POST'])
+@login_required
+def create_cdn_account():
+    """
+    Create a new CDN account with an encrypted API key.
+    Expects JSON: { name, provider, api_key }
+    """
+    data = request.get_json() or {}
+    name = (data.get('name') or '').strip()
+    provider = (data.get('provider') or 'Hack Club CDN').strip()
+    api_key = (data.get('api_key') or '').strip()
+
+    if not name:
+        return jsonify({'error': 'Account name is required'}), 400
+    if not api_key:
+        return jsonify({'error': 'API key is required'}), 400
+
+    account = CDNAccount(name=name, provider=provider)
+    account.set_api_key(api_key)
+    db.session.add(account)
+    db.session.commit()
+
+    return jsonify(account.to_dict(include_storage=False)), 201
+
+
 @api_bp.route('/cdn-accounts/<account_id>/test', methods=['POST'])
 @login_required
 def test_cdn_account(account_id):
