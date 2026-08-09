@@ -186,11 +186,13 @@ def upload_video_streamed(video_id):
             db.session.commit()
             return jsonify({'message': 'Upload saved'}), 201
 
-        # Stream raw body in chunks
-        chunk_size = 64 * 1024
+        # Stream raw body in chunks — 4 MB chunks reduce loop overhead for large files
+        chunk_size = 4 * 1024 * 1024
         bytes_written = 0
         last_update = 0
-        with open(save_path, 'wb') as out_f:
+        last_cancel_check = 0
+        # 8 MB write buffer lets the OS batch sequential disk writes efficiently
+        with open(save_path, 'wb', buffering=8 * 1024 * 1024) as out_f:
             while True:
                 chunk = request.stream.read(chunk_size)
                 if not chunk:
@@ -198,21 +200,24 @@ def upload_video_streamed(video_id):
                 out_f.write(chunk)
                 bytes_written += len(chunk)
 
-                # If the user has requested a cancellation while writing, abort immediately.
-                db.session.refresh(job)
-                if job.status == 'cancelled':
-                    out_f.flush()
-                    raise RuntimeError('Upload cancelled by user')
-
-                # Update Job progress periodically (every ~0.5s or when done)
                 now_ts = time.time()
+
+                # Check for cancellation at most every 5 seconds to avoid DB hammering
+                if now_ts - last_cancel_check > 5:
+                    db.session.refresh(job)
+                    last_cancel_check = now_ts
+                    if job.status == 'cancelled':
+                        out_f.flush()
+                        raise RuntimeError('Upload cancelled by user')
+
+                # Update Job progress at most every 2 seconds
                 if total_bytes > 0:
                     prog = min(100.0, (bytes_written / float(max(1, total_bytes))) * 100.0 * 0.8)
                 else:
                     # Unknown total length — use heuristics: show receiving step at 10%..80%
                     prog = min(80.0, 5.0 + (bytes_written / (1024 * 1024)) * 0.5)
 
-                if now_ts - last_update > 0.5 or bytes_written == total_bytes:
+                if now_ts - last_update > 2.0 or bytes_written == total_bytes:
                     job.current_step = 'Receiving upload'
                     job.current_message = f"Receiving {bytes_written} bytes"
                     job.progress = prog
