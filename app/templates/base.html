@@ -208,7 +208,7 @@
     // Live JWT Session Countdown Timer Logic
     async function updateSessionCountdown() {
       try {
-          const resp = await fetch('/auth/api/auth/session');
+          const resp = await fetch('/api/auth/session');
           if (resp.status === 401) {
             window.location.href = '/login';
             return;

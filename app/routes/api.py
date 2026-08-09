@@ -239,6 +239,13 @@ def delete_video_api(video_id):
     }), 202
 
 
+@api_bp.route('/jobs/<job_id>', methods=['GET'])
+@login_required
+def get_job_api(job_id):
+    job = Job.query.get_or_404(job_id)
+    return jsonify(job.to_dict(include_logs=False)), 200
+
+
 @api_bp.route('/jobs/<job_id>/cancel', methods=['POST'])
 @login_required
 def cancel_job_api(job_id):
