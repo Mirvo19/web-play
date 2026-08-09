@@ -38,13 +38,15 @@
 
 <script>
   const jobId = "{{ job.id }}";
+  const logsUrl = `/api/jobs/${encodeURIComponent(jobId)}/logs`;
+  const cancelUrl = `/api/jobs/${encodeURIComponent(jobId)}/cancel`;
   let _jobDetailToastId = null;
 
   async function cancelJob() {
     const btn = document.getElementById('cancelJobBtn');
     if (btn) btn.disabled = true;
     try {
-      const resp = await fetch(`/api/jobs/${jobId}/cancel`, { method: 'POST' });
+      const resp = await fetch(cancelUrl, { method: 'POST' });
       const data = await resp.json();
       if (!resp.ok) {
         showToast({ type: 'error', title: 'Cancel failed', message: data.error || 'Unable to cancel job' });
@@ -60,7 +62,7 @@
 
   setInterval(async () => {
     try {
-      const resp = await fetch(`/api/jobs/${jobId}/logs`);
+      const resp = await fetch(logsUrl);
       if (!resp.ok) return;
       const data = await resp.json();
       const logs = data.logs;
