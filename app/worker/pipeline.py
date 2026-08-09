@@ -209,7 +209,6 @@ def execute_video_pipeline(job_id: str):
 
         cdn_provider = CDNManager.get_provider_instance(cdn_account)
 
-    try:
         log_job(job_id, "Upload job started")
         update_job_progress(job_id, "Receiving file", 5.0)
         
