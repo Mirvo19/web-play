@@ -78,9 +78,11 @@
       <div class="content-body">
         {% block content %}{% endblock %}
       </div>
-      <div class="app-version-footer" title="Patch version: {{ app_version }}">
-        {{ app_version }}
+      <div class="app-version-footer" id="appVersionFooter" title="Latest commit on Mirvo19/web-play">
+        <span id="ghFooterSha" style="font-family: var(--font-mono); font-size: 0.75rem; opacity: 0.7;">{{ app_version }}</span>
+        <span id="ghFooterMsg" style="margin-left: 0.5rem; font-size: 0.75rem; opacity: 0.6;"></span>
       </div>
+
     </main>
   </div>
 
@@ -269,6 +271,38 @@
     updateSessionCountdown();
     setInterval(updateSessionCountdown, 1000);
   </script>
+
+  <script>
+    /* Live GitHub commit footer — fetches once per page load */
+    (function() {
+      fetch('https://api.github.com/repos/Mirvo19/web-play/commits?per_page=1', {
+        headers: { 'Accept': 'application/vnd.github.v3+json' }
+      })
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then(function(commits) {
+        if (!Array.isArray(commits) || !commits[0]) return;
+        var c = commits[0];
+        var sha = (c.sha || '').slice(0, 7);
+        var msg = (c.commit && c.commit.message ? c.commit.message.split('\n')[0] : '');
+        var url = c.html_url || 'https://github.com/Mirvo19/web-play';
+        var shaEl = document.getElementById('ghFooterSha');
+        var msgEl = document.getElementById('ghFooterMsg');
+        var footer = document.getElementById('appVersionFooter');
+        if (shaEl) {
+          shaEl.innerHTML = '<a href="' + url + '" target="_blank" rel="noopener" style="color: inherit; text-decoration: none; font-family: var(--font-mono);">' + sha + '</a>';
+        }
+        if (msgEl && msg) {
+          msgEl.textContent = '— ' + msg;
+        }
+        if (footer) {
+          footer.title = sha + ' · ' + msg;
+        }
+      })
+      .catch(function() { /* keep static fallback */ });
+    })();
+  </script>
+
   {% block scripts %}{% endblock %}
 </body>
 </html>
+
