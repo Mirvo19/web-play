@@ -162,6 +162,11 @@ def log_job(job_id: str, message: str, level: str = 'INFO', metadata: str = None
     if job:
         job.current_message = message
     db.session.commit()
+    # Also write job logs to stdout for debugging
+    try:
+        print(f"[JOB {job_id}] {level}: {formatted_msg}")
+    except Exception:
+        pass
 
 def update_job_progress(job_id: str, step: str, progress: float, message: str = None):
     job = Job.query.get(job_id)
@@ -434,6 +439,10 @@ def execute_video_pipeline(job_id: str):
                 upload_status='uploaded'
             )
             db.session.add(v_file)
+            try:
+                print(f"[UPLOAD] thumbnail -> url={res.get('url')} remote_path={res.get('remote_path')} size={res.get('file_size')}")
+            except Exception:
+                pass
             bytes_uploaded += res.get('file_size', 0)
 
         # Upload Variants
@@ -471,6 +480,11 @@ def execute_video_pipeline(job_id: str):
                 # Record CDN URL for this segment so we can rewrite variant
                 # playlists to point at the absolute segment URLs later.
                 variant_segment_urls.setdefault(target['label'], {})[s_file] = res['url']
+                # Log the CDN response for debugging (helps confirm remote_url)
+                try:
+                    log_job(job_id, f"Uploaded segment -> {res.get('url')} (remote_path={res.get('remote_path')})")
+                except Exception:
+                    pass
                 v_file = VideoFile(
                     video_id=video.id,
                     video_variant_id=v_record.id,
@@ -482,6 +496,10 @@ def execute_video_pipeline(job_id: str):
                     upload_status='uploaded'
                 )
                 db.session.add(v_file)
+                try:
+                    print(f"[UPLOAD] segment -> variant={target['label']} file={s_file} url={res.get('url')} remote_path={res.get('remote_path')} size={res.get('file_size')}")
+                except Exception:
+                    pass
                 uploaded_files_count += 1
                 files_processed += 1
                 bytes_uploaded += res.get('file_size', 0)
@@ -517,8 +535,9 @@ def execute_video_pipeline(job_id: str):
                         for line in lines:
                             stripped = line.strip()
                             if stripped and not stripped.startswith('#'):
-                                # Replace with absolute URL if we have it
-                                replacement = seg_map.get(stripped, stripped)
+                                # Replace with absolute URL if we have it. Try exact
+                                # match first, then fallback to basename match.
+                                replacement = seg_map.get(stripped) or seg_map.get(os.path.basename(stripped)) or stripped
                                 wf.write(f"{replacement}\n")
                             else:
                                 wf.write(line)
@@ -527,6 +546,10 @@ def execute_video_pipeline(job_id: str):
                     upload_path = p_path
 
                 res = cdn_provider.upload_file(upload_path, remote_name)
+                try:
+                    log_job(job_id, f"Uploaded playlist -> {res.get('url')} (remote_path={res.get('remote_path')})")
+                except Exception:
+                    pass
                 v_record.playlist_url = res['url']
                 # Record the uploaded variant playlist URL so master can
                 # reference absolute playlist URLs.
@@ -542,6 +565,10 @@ def execute_video_pipeline(job_id: str):
                     upload_status='uploaded'
                 )
                 db.session.add(v_file)
+                try:
+                    print(f"[UPLOAD] playlist -> variant={target['label']} file={p_file} url={res.get('url')} remote_path={res.get('remote_path')} size={res.get('file_size')}")
+                except Exception:
+                    pass
                 files_processed += 1
                 bytes_uploaded += res.get('file_size', 0)
 
@@ -576,6 +603,10 @@ def execute_video_pipeline(job_id: str):
             upload_status='uploaded'
         )
         db.session.add(master_v_file)
+        try:
+            print(f"[UPLOAD] master -> url={master_res.get('url')} remote_path={master_res.get('remote_path')} size={master_res.get('file_size')}")
+        except Exception:
+            pass
 
         video.master_playlist_url = master_res['url']
         video.thumbnail_url = thumb_cdn_url
