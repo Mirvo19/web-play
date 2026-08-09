@@ -80,9 +80,9 @@ class HackClubCDNProvider(CDNProvider):
         else:
             raise RuntimeError(f"CDN upload failed ({response.status_code}): {response.text}")
 
-    def delete_file(self, remote_path_or_url: str) -> bool:
+    def delete_file(self, remote_path_or_url: str):
         if not remote_path_or_url:
-            return True
+            return True, []
 
         headers = {"Authorization": f"Bearer {self.api_key}"}
         
@@ -96,9 +96,11 @@ class HackClubCDNProvider(CDNProvider):
             try:
                 tried.append(remote_path_or_url)
                 resp = requests.delete(remote_path_or_url, headers=headers, timeout=15)
+                tried[-1] = {'endpoint': remote_path_or_url, 'status': resp.status_code, 'body': resp.text}
                 if resp.status_code in (200, 204, 404):
-                    return True
+                    return True, tried
             except Exception:
+                tried[-1] = {'endpoint': remote_path_or_url, 'error': 'exception'}
                 pass
 
         # Try API deletion endpoints that accept an ID/key (include documented /api/v4/upload/:id)
@@ -113,21 +115,39 @@ class HackClubCDNProvider(CDNProvider):
             try:
                 tried.append(endpoint)
                 resp = requests.delete(endpoint, headers=headers, timeout=15)
+                # Optionally log response details for debugging
+                try:
+                    from flask import current_app
+                    if current_app.config.get('LOG_TO_STDOUT', False):
+                        try:
+                            print(f"[CDN DELETE] Tried {endpoint} -> {resp.status_code} | {resp.text}")
+                        except Exception:
+                            print(f"[CDN DELETE] Tried {endpoint} -> {resp.status_code}")
+                except Exception:
+                    pass
+
                 # Treat 200/204/404 as success (404 = already removed)
+                tried[-1] = {'endpoint': endpoint, 'status': resp.status_code, 'body': resp.text}
                 if resp.status_code in (200, 204, 404):
                     # If provider returns JSON, prefer explicit deleted flag
                     try:
                         j = resp.json()
                         if isinstance(j, dict) and 'deleted' in j:
                             if j.get('deleted'):
-                                return True
+                                return True, tried
                             else:
                                 # explicit false - continue to other endpoints
                                 continue
                     except Exception:
                         # not JSON or parse failed — accept status codes as OK
-                        return True
-            except Exception:
+                        return True, tried
+            except Exception as e:
+                try:
+                    from flask import current_app
+                    if current_app.config.get('LOG_TO_STDOUT', False):
+                        print(f"[CDN DELETE] Exception trying {endpoint}: {e}")
+                except Exception:
+                    pass
                 continue
 
         # Try POST-based deletion endpoint (some providers expect POST)
@@ -135,9 +155,11 @@ class HackClubCDNProvider(CDNProvider):
             post_endpoint = f"{self.BASE_URL}/api/v4/delete"
             tried.append(post_endpoint)
             resp = requests.post(post_endpoint, headers=headers, json={"id": file_id}, timeout=15)
+            tried[-1] = {'endpoint': post_endpoint, 'status': resp.status_code, 'body': resp.text}
             if resp.status_code in (200, 204, 404):
-                return True
-        except Exception:
+                return True, tried
+        except Exception as e:
+            tried.append({'endpoint': post_endpoint, 'error': str(e)})
             pass
 
         # As a last resort, try deleting by the basename-only under the API root
@@ -145,13 +167,15 @@ class HackClubCDNProvider(CDNProvider):
             fallback = f"{self.BASE_URL}/{file_id}"
             tried.append(fallback)
             resp = requests.delete(fallback, headers=headers, timeout=15)
+            tried[-1] = {'endpoint': fallback, 'status': resp.status_code, 'body': resp.text}
             if resp.status_code in (200, 204, 404):
-                return True
-        except Exception:
+                return True, tried
+        except Exception as e:
+            tried.append({'endpoint': fallback, 'error': str(e)})
             pass
 
-        # If none of the attempts returned a definitive success, return False
-        return False
+        # If none of the attempts returned a definitive success, return False with attempt details
+        return False, tried
 
     def get_storage_info(self) -> Dict[str, int]:
         headers = {"Authorization": f"Bearer {self.api_key}"}

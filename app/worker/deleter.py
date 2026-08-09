@@ -66,7 +66,30 @@ def execute_video_deletion(job_id: str):
             identifier = f.remote_url or f.remote_path
             try:
                 log_delete_job(job_id, f"Attempting delete for {identifier}")
-                success = cdn_provider.delete_file(identifier)
+                result = cdn_provider.delete_file(identifier)
+                # Support provider returning (success, attempts) or plain bool
+                if isinstance(result, tuple) and len(result) == 2:
+                    success, attempts = result
+                else:
+                    success, attempts = bool(result), None
+
+                # Log attempt details into JobLog for visibility in UI
+                if attempts:
+                    for a in attempts:
+                        if isinstance(a, dict):
+                            ep = a.get('endpoint') or str(a)
+                            if 'error' in a:
+                                log_delete_job(job_id, f"Delete attempt {ep} -> ERROR: {a.get('error')}", level='WARNING')
+                            else:
+                                status = a.get('status')
+                                body = a.get('body')
+                                msg = f"Delete attempt {ep} -> {status}"
+                                if body:
+                                    # Truncate long bodies
+                                    body_snip = (body[:800] + '...') if len(body) > 800 else body
+                                    msg += f" | body: {body_snip}"
+                                log_delete_job(job_id, msg)
+
                 if success:
                     f.upload_status = 'deleted'
                     f.deleted_at = datetime.now(timezone.utc)
