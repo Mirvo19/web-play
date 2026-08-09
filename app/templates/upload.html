@@ -56,41 +56,41 @@
     </form>
   </div>
 
-  <!-- Live Status Pipeline & Logs -->
+  <!-- Live Status -->
   <div class="clay-card">
     <div class="clay-card-header">
-      <h3 class="clay-card-title">Detailed Pipeline & Live Logs</h3>
+      <h3 class="clay-card-title">Pipeline & Live Logs</h3>
     </div>
 
     <div id="pipelineContainer" style="display: none;">
-      <div style="margin-bottom: 1rem;">
-        <div style="display: flex; justify-content: space-between; font-weight: 600; font-size: 0.9rem; margin-bottom: 0.4rem;">
-          <span id="pipelineStepText">Receiving file...</span>
-          <span id="pipelineProgressText">0%</span>
+
+      <!-- Bar 1: Upload to server (owned by XHR onprogress only) -->
+      <div style="margin-bottom: 1.25rem;">
+        <div style="display: flex; justify-content: space-between; font-size: 0.82rem; color: var(--color-muted); margin-bottom: 0.35rem;">
+          <span>Upload to server</span>
+          <span id="uploadBar1Detail">—</span>
         </div>
         <div class="progress-bar-container">
-          <div id="pipelineProgressBar" class="progress-bar-fill" style="width: 0%;"></div>
+          <div id="uploadBar1" class="progress-bar-fill" style="width: 0%;"></div>
         </div>
       </div>
 
-      <!-- Stage Checklist -->
-      <div id="pipelineStages" style="display: flex; flex-direction: column; gap: 0.4rem; font-size: 0.85rem; margin-bottom: 1.25rem;">
-        <div id="stage-receive" data-stage="Receiving file" data-state="pending" class="stage-item">[ ] Receiving upload</div>
-        <div id="stage-validate" data-stage="Validating file" data-state="pending" class="stage-item">[ ] Validating file</div>
-        <div id="stage-inspect" data-stage="Inspecting video" data-state="pending" class="stage-item">[ ] Inspecting media metadata (resolution, FPS, duration)</div>
-        <div id="stage-profiles" data-stage="Determining quality profiles" data-state="pending" class="stage-item">[ ] Determining quality profiles</div>
-        <div id="stage-transcode" data-stage="Encoding video variants" data-state="pending" class="stage-item">[ ] Encoding Original + Step Down HLS variants</div>
-        <div id="stage-hls" data-stage="Generating HLS" data-state="pending" class="stage-item">[ ] Generating HLS master playlist</div>
-        <div id="stage-upload-cdn" data-stage="Uploading to CDN" data-state="pending" class="stage-item">[ ] Uploading HLS segments & playlists to CDN</div>
-        <div id="stage-verify" data-stage="Verifying CDN files" data-state="pending" class="stage-item">[ ] Verifying remote CDN files</div>
-        <div id="stage-cleanup" data-stage="Cleaning local server" data-state="pending" class="stage-item">[ ] Reclaiming local server disk space</div>
-        <div id="stage-complete" data-stage="Complete" data-state="pending" class="stage-item">[ ] Completed</div>
+      <!-- Bar 2: Server-side processing (owned by job polling only) -->
+      <div style="margin-bottom: 1.25rem;">
+        <div style="display: flex; justify-content: space-between; font-size: 0.82rem; color: var(--color-muted); margin-bottom: 0.35rem;">
+          <span id="processingBarLabel">Processing pipeline</span>
+          <span id="processingBarDetail">Waiting for upload...</span>
+        </div>
+        <div class="progress-bar-container">
+          <div id="processingBar" class="progress-bar-fill" style="width: 0%; background: var(--color-accent-secondary, #a78bfa);"></div>
+        </div>
       </div>
+
     </div>
 
     <label class="form-label">Real-time Terminal Logs</label>
     <div id="logConsole" class="log-console">
-07:41:00  Ready to accept video upload stream...
+Ready to accept video upload stream...
     </div>
   </div>
 </div>
@@ -98,7 +98,6 @@
 <script>
   let activeJobId = null;
   let logPollInterval = null;
-  let jobStatus = null;
   let uploadToastId = null;
   let currentUploadXhr = null;
 
@@ -129,7 +128,6 @@
     btn.disabled = true;
     btn.textContent = 'Uploading... 0%';
     cancelBtn.disabled = false;
-
     document.getElementById('pipelineContainer').style.display = 'block';
 
     try {
@@ -154,7 +152,6 @@
 
       activeJobId = initData.job_id;
       localStorage.setItem('hc_active_job_id', activeJobId);
-      document.getElementById('pipelineContainer').style.display = 'block';
       startLogPolling(activeJobId);
 
       currentUploadXhr = new XMLHttpRequest();
@@ -162,26 +159,29 @@
 
       uploadToastId = showProgressToast({ title: 'Uploading source', message: 'Starting upload...', autoDismiss: false });
 
+      // ── Bar 1 owner: XHR onprogress ──────────────────────────────────────
       currentUploadXhr.upload.onprogress = function(ev) {
         if (ev.lengthComputable) {
-          const pct = Math.round((ev.loaded / ev.total) * 100);
-          document.getElementById('pipelineProgressBar').style.width = pct + '%';
-          document.getElementById('pipelineProgressText').textContent = pct + '%';
-          document.getElementById('pipelineStepText').textContent = 'Uploading source video';
+          const pct      = Math.round((ev.loaded / ev.total) * 100);
+          const loadedMB = (ev.loaded / 1024 / 1024).toFixed(0);
+          const totalMB  = (ev.total  / 1024 / 1024).toFixed(0);
+          document.getElementById('uploadBar1').style.width = pct + '%';
+          document.getElementById('uploadBar1Detail').textContent = `${loadedMB} MB / ${totalMB} MB`;
           btn.textContent = `Uploading... ${pct}%`;
-          updateToastProgress(uploadToastId, pct, `${(ev.loaded/1024/1024).toFixed(2)} MB / ${(ev.total/1024/1024).toFixed(2)} MB`);
+          updateToastProgress(uploadToastId, pct, `${loadedMB} MB / ${totalMB} MB`);
         } else {
-          document.getElementById('pipelineStepText').textContent = 'Uploading source video (sending...)';
-          updateToastProgress(uploadToastId, 10, 'Sending...');
+          document.getElementById('uploadBar1Detail').textContent = 'Sending...';
         }
       };
 
       currentUploadXhr.onload = function() {
         if (currentUploadXhr.status >= 200 && currentUploadXhr.status < 300) {
+          document.getElementById('uploadBar1').style.width = '100%';
+          document.getElementById('uploadBar1Detail').textContent = 'Complete';
           btn.textContent = 'Upload complete — queued for processing';
           btn.disabled = true;
-          updateToastProgress(uploadToastId, 100, 'Upload complete — queued');
-          setTimeout(() => closeToast(uploadToastId), 900);
+          updateToastProgress(uploadToastId, 100, 'Upload complete — queued for processing');
+          // Toast stays open — polling loop will update it through processing
         } else {
           showToast({ type: 'error', title: 'Upload failed', message: currentUploadXhr.responseText || 'Upload error' });
           closeToast(uploadToastId);
@@ -205,22 +205,16 @@
 
     } catch (err) {
       showToast({ type: 'error', title: 'Upload error', message: 'Network error streaming file upload.' });
-      const btn = document.getElementById('startUploadBtn');
-      const cancelBtn = document.getElementById('cancelUploadBtn');
       btn.disabled = false;
       btn.textContent = 'Start Upload & Processing';
-      cancelBtn.disabled = true;
+      document.getElementById('cancelUploadBtn').disabled = true;
       localStorage.removeItem('hc_active_job_id');
     }
   });
 
   function cancelCurrentJob() {
-    if (currentUploadXhr) {
-      currentUploadXhr.abort();
-    }
-    if (!activeJobId) {
-      return;
-    }
+    if (currentUploadXhr) currentUploadXhr.abort();
+    if (!activeJobId) return;
     const cancelBtn = document.getElementById('cancelUploadBtn');
     cancelBtn.disabled = true;
     fetch(`/api/jobs/${activeJobId}/cancel`, { method: 'POST' })
@@ -239,57 +233,58 @@
       });
   }
 
+  // ── Bar 2 owner: job polling ────────────────────────────────────────────
   function startLogPolling(jobId) {
     if (logPollInterval) clearInterval(logPollInterval);
-    
+
     logPollInterval = setInterval(async () => {
       try {
         const resp = await fetch(`/api/jobs/${jobId}`);
         if (!resp.ok) return;
-
         const job = await resp.json();
-        document.getElementById('pipelineProgressBar').style.width = `${job.progress}%`;
-        document.getElementById('pipelineProgressText').textContent = `${Math.round(job.progress)}%`;
-        document.getElementById('pipelineStepText').textContent = job.current_step || 'Processing...';
 
-        const btn = document.getElementById('startUploadBtn');
-        const cancelBtn = document.getElementById('cancelUploadBtn');
+        const procBar    = document.getElementById('processingBar');
+        const procLabel  = document.getElementById('processingBarLabel');
+        const procDetail = document.getElementById('processingBarDetail');
+        const btn        = document.getElementById('startUploadBtn');
+        const cancelBtn  = document.getElementById('cancelUploadBtn');
 
         if (job.status === 'receiving') {
-          btn.textContent = job.current_step || 'Receiving upload';
+          procBar.style.width = '0%';
+          procLabel.textContent = 'Processing pipeline';
+          procDetail.textContent = 'Waiting for upload...';
           btn.disabled = true;
           cancelBtn.disabled = false;
-          if (uploadToastId) {
-            updateToastProgress(uploadToastId, Math.round(job.progress), job.current_step || 'Receiving upload');
-          }
-        } else if (job.status === 'processing') {
-          btn.textContent = job.current_step && job.progress < 100 ? `${job.current_step} — ${Math.round(job.progress)}%` : 'Processing...';
-          btn.disabled = true;
-          cancelBtn.disabled = false;
-          if (uploadToastId) {
-            updateToastProgress(uploadToastId, Math.round(job.progress), job.current_step);
-          }
         } else if (job.status === 'queued') {
+          procBar.style.width = '5%';
+          procLabel.textContent = 'Processing pipeline';
+          procDetail.textContent = 'Queued — waiting for worker';
           btn.textContent = 'Queued for processing';
           btn.disabled = true;
           cancelBtn.disabled = false;
+          if (uploadToastId) updateToastProgress(uploadToastId, 100, 'Queued — waiting for worker...');
+        } else if (job.status === 'processing') {
+          procBar.style.width = `${job.progress}%`;
+          procLabel.textContent = job.current_step || 'Processing...';
+          procDetail.textContent = `${Math.round(job.progress)}%`;
+          btn.textContent = job.current_step || 'Processing...';
+          btn.disabled = true;
+          cancelBtn.disabled = false;
+          if (uploadToastId) updateToastProgress(uploadToastId, Math.round(job.progress), job.current_step || 'Processing...');
         } else if (job.status === 'completed') {
-          btn.textContent = 'Completed';
+          procBar.style.width = '100%';
+          procLabel.textContent = 'Completed ✓';
+          procDetail.textContent = '100%';
+          btn.textContent = 'Completed ✓';
           btn.disabled = false;
           cancelBtn.disabled = true;
           showToast({ type: 'success', title: 'Job completed', message: 'Processing finished successfully' });
           if (uploadToastId) closeToast(uploadToastId);
-          // Mark the final pipeline stage as completed in the UI
-          try {
-            const finalEl = document.querySelector('#stage-complete');
-            if (finalEl) {
-              finalEl.setAttribute('data-state', 'completed');
-              finalEl.textContent = '✓ ' + finalEl.textContent.replace(/^[\[\]\s✓→!]+/, '').trim();
-            }
-          } catch (e) {}
           clearInterval(logPollInterval);
           localStorage.removeItem('hc_active_job_id');
         } else if (job.status === 'failed') {
+          procLabel.textContent = 'Failed';
+          procDetail.textContent = job.error_message || 'Error';
           btn.textContent = 'Processing Failed';
           btn.disabled = false;
           cancelBtn.disabled = true;
@@ -298,6 +293,8 @@
           clearInterval(logPollInterval);
           localStorage.removeItem('hc_active_job_id');
         } else if (job.status === 'cancelled') {
+          procLabel.textContent = 'Cancelled';
+          procDetail.textContent = '—';
           btn.textContent = 'Cancelled';
           btn.disabled = false;
           cancelBtn.disabled = true;
@@ -307,37 +304,12 @@
           localStorage.removeItem('hc_active_job_id');
         }
 
+        // Logs only — never touches either progress bar
         const logsResp = await fetch(`/api/jobs/${jobId}/logs`);
         if (!logsResp.ok) return;
         const data = await logsResp.json();
-        const logs = data.logs;
-        const stageEls = document.querySelectorAll('#pipelineStages .stage-item');
-        stageEls.forEach(el => {
-          el.setAttribute('data-state', 'pending');
-          el.textContent = `[ ] ${el.textContent.replace(/^[\[\] ✓→!]+\s*/, '')}`;
-        });
-        const textLogs = logs.map(l => l.message).join('\n');
-        const markIf = (selector, check) => {
-          const el = document.querySelector(selector);
-          if (!el) return;
-          if (check(textLogs, job)) {
-            el.setAttribute('data-state', 'completed');
-            el.textContent = '✓ ' + el.textContent.replace(/^[\[\]\s✓→!]+/, '').trim();
-          }
-        };
-        markIf('#stage-receive', (logsTxt) => /Received file:/i.test(logsTxt));
-        markIf('#stage-validate', (logsTxt) => /File validated/i.test(logsTxt));
-        markIf('#stage-inspect', (logsTxt) => /Resolution detected:/i.test(logsTxt));
-        markIf('#stage-profiles', (logsTxt) => /Target profiles determined:/i.test(logsTxt));
-        markIf('#stage-transcode', (logsTxt) => /Encoding variant/i.test(logsTxt) || /Variant .* encoding complete/i.test(logsTxt));
-        markIf('#stage-hls', (logsTxt) => /Generating HLS master playlist/i.test(logsTxt));
-        markIf('#stage-upload-cdn', (logsTxt) => /CDN upload complete/i.test(logsTxt) || /Uploaded segment/i.test(logsTxt));
-        markIf('#stage-verify', (logsTxt) => /Verified master playlist/i.test(logsTxt));
-        markIf('#stage-cleanup', (logsTxt) => /Local source deleted|Local HLS files deleted|Temporary directory removed/i.test(logsTxt));
-        markIf('#stage-complete', (logsTxt, jobObj) => /Video is now fully hosted on CDN/i.test(logsTxt) || jobObj && jobObj.status === 'completed');
-
         const logBox = document.getElementById('logConsole');
-        logBox.textContent = logs.map(l => l.message).join('\n');
+        logBox.textContent = data.logs.map(l => l.message).join('\n');
         logBox.scrollTop = logBox.scrollHeight;
       } catch (e) {
         console.error('Log fetch error:', e);
