@@ -101,8 +101,9 @@ class HackClubCDNProvider(CDNProvider):
             except Exception:
                 pass
 
-        # Try API deletion endpoints that accept an ID/key
+        # Try API deletion endpoints that accept an ID/key (include documented /api/v4/upload/:id)
         delete_endpoints = [
+            f"{self.BASE_URL}/api/v4/upload/{file_id}",
             f"{self.BASE_URL}/api/v4/files/{file_id}",
             f"{self.BASE_URL}/api/v4/delete/{file_id}",
             f"{self.BASE_URL}/api/v4/{file_id}",
@@ -112,8 +113,20 @@ class HackClubCDNProvider(CDNProvider):
             try:
                 tried.append(endpoint)
                 resp = requests.delete(endpoint, headers=headers, timeout=15)
+                # Treat 200/204/404 as success (404 = already removed)
                 if resp.status_code in (200, 204, 404):
-                    return True
+                    # If provider returns JSON, prefer explicit deleted flag
+                    try:
+                        j = resp.json()
+                        if isinstance(j, dict) and 'deleted' in j:
+                            if j.get('deleted'):
+                                return True
+                            else:
+                                # explicit false - continue to other endpoints
+                                continue
+                    except Exception:
+                        # not JSON or parse failed — accept status codes as OK
+                        return True
             except Exception:
                 continue
 
