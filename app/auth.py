@@ -3,6 +3,7 @@ import jwt
 import requests
 from functools import wraps
 from datetime import datetime, timedelta, timezone
+from typing import Optional, Tuple
 from flask import Blueprint, request, jsonify, redirect, url_for, make_response, render_template, current_app
 
 auth_bp = Blueprint('auth', __name__)
