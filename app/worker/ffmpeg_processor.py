@@ -17,6 +17,8 @@ RESOLUTION_LADDER = [
 def inspect_video(file_path: str, ffprobe_bin: str = None) -> Dict[str, Any]:
     """Inspect video file metadata using ffprobe."""
     ffprobe_bin = ffprobe_bin or shutil.which('ffprobe')
+    if ffprobe_bin and not os.path.isabs(ffprobe_bin):
+        ffprobe_bin = shutil.which(ffprobe_bin) or ffprobe_bin
     if not ffprobe_bin:
         raise RuntimeError('FFprobe executable not found. Please install ffprobe or set full path in FFMPEG_BIN/FFPROBE_BIN environment variables.')
 
@@ -28,10 +30,23 @@ def inspect_video(file_path: str, ffprobe_bin: str = None) -> Dict[str, Any]:
         '-show_streams',
         file_path
     ]
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"FFprobe executable not found at path: {ffprobe_bin}") from exc
+
+    stderr = (result.stderr or '').strip()
+    stdout = (result.stdout or '').strip()
     if result.returncode != 0:
-        raise RuntimeError(f"ffprobe failed: {result.stderr.strip()}")
-    probe_data = json.loads(result.stdout)
+        details = stderr or stdout or 'No output was produced by ffprobe.'
+        raise RuntimeError(f"ffprobe failed (rc={result.returncode}): {details}")
+
+    try:
+        probe_data = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"ffprobe returned invalid JSON. stdout={stdout[:400]} stderr={stderr[:400]}"
+        ) from exc
 
     width = 0
     height = 0

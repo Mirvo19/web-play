@@ -229,7 +229,11 @@ def execute_video_pipeline(job_id: str):
         # Step 2: Inspect video metadata
         # Verify ffmpeg and ffprobe availability before proceeding
         ffmpeg_bin = current_app.config.get('FFMPEG_BINARY') or shutil.which('ffmpeg')
+        if ffmpeg_bin and not os.path.isabs(ffmpeg_bin):
+            ffmpeg_bin = shutil.which(ffmpeg_bin) or ffmpeg_bin
         ffprobe_bin = current_app.config.get('FFPROBE_BINARY') or shutil.which('ffprobe')
+        if ffprobe_bin and not os.path.isabs(ffprobe_bin):
+            ffprobe_bin = shutil.which(ffprobe_bin) or ffprobe_bin
 
         ffmpeg_exists = bool(ffmpeg_bin and ((os.path.isabs(ffmpeg_bin) and os.path.exists(ffmpeg_bin)) or shutil.which(ffmpeg_bin)))
         ffprobe_exists = bool(ffprobe_bin and ((os.path.isabs(ffprobe_bin) and os.path.exists(ffprobe_bin)) or shutil.which(ffprobe_bin)))
