@@ -14,9 +14,9 @@ RESOLUTION_LADDER = [
     (426,  240,  '240p')
 ]
 
-def inspect_video(file_path: str) -> Dict[str, Any]:
+def inspect_video(file_path: str, ffprobe_bin: str = None) -> Dict[str, Any]:
     """Inspect video file metadata using ffprobe."""
-    ffprobe_bin = shutil.which('ffprobe')
+    ffprobe_bin = ffprobe_bin or shutil.which('ffprobe')
     if not ffprobe_bin:
         raise RuntimeError('FFprobe executable not found. Please install ffprobe or set full path in FFMPEG_BIN/FFPROBE_BIN environment variables.')
 
@@ -33,30 +33,39 @@ def inspect_video(file_path: str) -> Dict[str, Any]:
         raise RuntimeError(f"ffprobe failed: {result.stderr.strip()}")
     probe_data = json.loads(result.stdout)
 
-    width = 1920
-    height = 1080
+    width = 0
+    height = 0
     fps = 30.0
     duration = 0.0
     has_audio = False
     bitrate = 0
+    video_codec = None
+    audio_codec = None
+    format_name = None
 
     format_data = probe_data.get('format', {})
     duration = float(format_data.get('duration', 0.0))
     bitrate = int(format_data.get('bit_rate', 0))
+    format_name = format_data.get('format_name')
 
     for stream in probe_data.get('streams', []):
         codec_type = stream.get('codec_type')
-        if codec_type == 'video' and width == 1920 and height == 1080:
-            width = int(stream.get('width', 1920))
-            height = int(stream.get('height', 1080))
+        if codec_type == 'video' and width == 0 and height == 0:
+            width = int(stream.get('width', 0) or 0)
+            height = int(stream.get('height', 0) or 0)
             fps_str = stream.get('r_frame_rate', '30/1')
             if '/' in fps_str:
                 num, den = fps_str.split('/')
                 fps = float(num) / float(den) if float(den) > 0 else 30.0
             else:
                 fps = float(fps_str) if fps_str else 30.0
+            video_codec = stream.get('codec_name')
         elif codec_type == 'audio':
             has_audio = True
+            audio_codec = stream.get('codec_name')
+
+    if width == 0 or height == 0:
+        raise RuntimeError('Unable to determine video resolution from source file.')
 
     return {
         'width': width,
@@ -65,7 +74,10 @@ def inspect_video(file_path: str) -> Dict[str, Any]:
         'fps': round(fps, 2),
         'bitrate': bitrate,
         'size': int(format_data.get('size', os.path.getsize(file_path))),
-        'has_audio': has_audio
+        'has_audio': has_audio,
+        'video_codec': video_codec,
+        'audio_codec': audio_codec,
+        'format_name': format_name
     }
 
 
@@ -119,11 +131,12 @@ def build_ffmpeg_transcode_command(
     input_path: str,
     output_dir: str,
     target: Dict[str, Any],
+    meta: Dict[str, Any],
     threads: int = 40,
     preset: str = 'veryfast',
     crf: int = 23,
     segment_duration: int = 6
-) -> Tuple[List[str], str, str]:
+) -> Tuple[List[str], str]:
     """Build FFmpeg command to produce HLS variant playlist."""
     os.makedirs(output_dir, exist_ok=True)
     playlist_path = os.path.join(output_dir, 'playlist.m3u8')
@@ -131,23 +144,46 @@ def build_ffmpeg_transcode_command(
 
     width = target['width']
     height = target['height']
+    fps = max(1, round(meta.get('fps', 30.0)))
+    keyint = max(1, int(segment_duration * fps))
 
     ffmpeg_bin = shutil.which('ffmpeg') or 'ffmpeg'
     cmd = [
         ffmpeg_bin,
         '-y',
         '-progress', 'pipe:1',
-        '-threads', str(threads),
+        '-nostats',
+        '-threads', str(max(1, threads)),
         '-i', input_path,
-        '-c:v', 'libx264',
-        '-preset', preset,
-        '-crf', str(crf),
-        '-vf', f'scale={width}:{height}:force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2',
-        '-c:a', 'aac',
-        '-b:a', '128k',
-        '-ac', '2',
-        '-g', str(int(segment_duration * 30)),
-        '-keyint_min', str(int(segment_duration * 30)),
+        '-map', '0:v:0'
+    ]
+
+    if meta.get('has_audio'):
+        cmd += ['-map', '0:a:0?']
+
+    if target.get('is_original') and meta.get('video_codec') == 'h264' and meta.get('width') == width and meta.get('height') == height:
+        cmd += ['-c:v', 'copy']
+    else:
+        cmd += [
+            '-c:v', 'libx264',
+            '-preset', preset,
+            '-crf', str(crf),
+            '-x264-params', f'keyint={keyint}:scenecut=0',
+            '-vf', f'scale={width}:{height}:force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2',
+            '-pix_fmt', 'yuv420p'
+        ]
+
+    if meta.get('has_audio'):
+        if meta.get('audio_codec') == 'aac':
+            cmd += ['-c:a', 'copy']
+        else:
+            cmd += ['-c:a', 'aac', '-b:a', '128k', '-ac', '2']
+    else:
+        cmd += ['-an']
+
+    cmd += [
+        '-g', str(keyint),
+        '-keyint_min', str(keyint),
         '-sc_threshold', '0',
         '-hls_time', str(segment_duration),
         '-hls_playlist_type', 'vod',
@@ -155,7 +191,7 @@ def build_ffmpeg_transcode_command(
         playlist_path
     ]
 
-    return cmd, playlist_path, segment_filename_pattern
+    return cmd, playlist_path
 
 
 def extract_thumbnail(input_path: str, output_path: str, timestamp_sec: float = 1.0) -> bool:

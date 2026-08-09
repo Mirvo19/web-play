@@ -163,12 +163,15 @@ def log_job(job_id: str, message: str, level: str = 'INFO', metadata: str = None
         job.current_message = message
     db.session.commit()
 
-def update_job_progress(job_id: str, step: str, progress: float):
+def update_job_progress(job_id: str, step: str, progress: float, message: str = None):
     job = Job.query.get(job_id)
     if job:
         job.current_step = step
         job.progress = min(100.0, max(0.0, progress))
+        if message is not None:
+            job.current_message = message
         db.session.commit()
+
 
 def execute_video_pipeline(job_id: str):
     """
@@ -222,10 +225,11 @@ def execute_video_pipeline(job_id: str):
         ffmpeg_bin = current_app.config.get('FFMPEG_BINARY') or shutil.which('ffmpeg')
         ffprobe_bin = current_app.config.get('FFPROBE_BINARY') or shutil.which('ffprobe')
 
-        if not ffmpeg_bin or shutil.which(ffmpeg_bin) is None and not os.path.isabs(ffmpeg_bin):
-            msg = "FFmpeg is not installed or cannot be found on the server."
+        ffmpeg_exists = bool(ffmpeg_bin and ((os.path.isabs(ffmpeg_bin) and os.path.exists(ffmpeg_bin)) or shutil.which(ffmpeg_bin)))
+        ffprobe_exists = bool(ffprobe_bin and ((os.path.isabs(ffprobe_bin) and os.path.exists(ffprobe_bin)) or shutil.which(ffprobe_bin)))
+        if not ffmpeg_exists or not ffprobe_exists:
+            msg = "FFmpeg/FFprobe are not installed or cannot be found on the server."
             log_job(job_id, msg, level='ERROR')
-            # Log which executables were (not) found
             log_job(job_id, f"FFmpeg executable: {ffmpeg_bin or 'Not found'}", level='ERROR')
             log_job(job_id, f"FFprobe executable: {ffprobe_bin or 'Not found'}", level='ERROR')
             job.status = 'failed'
@@ -234,7 +238,7 @@ def execute_video_pipeline(job_id: str):
             return
 
         log_job(job_id, "Inspecting source media with ffprobe")
-        meta = inspect_video(source_file)
+        meta = inspect_video(source_file, ffprobe_bin)
         video.source_width = meta['width']
         video.source_height = meta['height']
         video.source_fps = meta['fps']
@@ -268,96 +272,97 @@ def execute_video_pipeline(job_id: str):
         # Step 3 & 4: Transcode quality variants
         for idx, target in enumerate(targets):
             v_dir = os.path.join(work_dir, target['label'])
-            cmd, playlist_file, pattern = build_ffmpeg_transcode_command(
-                source_file, v_dir, target, threads, preset, crf, segment_duration
+            cmd, playlist_file = build_ffmpeg_transcode_command(
+                source_file, v_dir, target, meta, threads, preset, crf, segment_duration
             )
-            # Ensure the ffmpeg binary is the one resolved earlier
             cmd[0] = ffmpeg_bin
 
-            log_job(job_id, f"Encoding variant {target['label']} ({target['width']}x{target['height']})")
+            log_job(job_id, f"Encoding variant {idx+1}/{len(targets)}: {target['label']} ({target['width']}x{target['height']})")
+            update_job_progress(job_id, f"Encoding variant {idx+1}/{len(targets)}: {target['label']}", current_base_prog, message="Starting encoding")
 
-            # Run ffmpeg and parse its -progress pipe:1 output to compute real-time progress
             try:
-                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
                 controller.set_process(proc)
-                variant_done = False
-                last_reported = 0.0
-                parsed = {}
-                last_update_ts = time.time()
 
-                # Read stdout lines for progress info
+                stderr_lines = []
+                def consume_stderr():
+                    for stderr_line in proc.stderr:
+                        stderr_lines.append(stderr_line)
+                stderr_thread = threading.Thread(target=consume_stderr, daemon=True)
+                stderr_thread.start()
+
+                parsed = {}
+                last_reported = 0.0
+                last_update_ts = time.time()
                 while True:
                     line = proc.stdout.readline()
-                    if not line:
-                        if proc.poll() is not None:
-                            break
-                        continue
+                    if line is None:
+                        break
                     line = line.strip()
-                    if '=' in line:
-                        k, v = line.split('=', 1)
-                        parsed[k.strip()] = v.strip()
+                    if line:
+                        if '=' in line:
+                            key, value = line.split('=', 1)
+                            parsed[key.strip()] = value.strip()
 
-                    # When we see a progress= entry or regularly, compute and update
-                    if 'out_time' in parsed or 'out_time_ms' in parsed or ('progress' in parsed and parsed.get('progress') == 'continue'):
-                        # Prefer out_time_ms when present
-                        secs = 0.0
-                        if 'out_time_ms' in parsed:
-                            try:
-                                secs = float(parsed.get('out_time_ms', 0)) / 1000000.0
-                            except Exception:
-                                secs = 0.0
-                        elif 'out_time' in parsed:
-                            try:
-                                parts = parsed.get('out_time', '0:00:00').split(':')
-                                secs = float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
-                            except Exception:
-                                secs = 0.0
+                        if parsed.get('progress') == 'continue' or 'out_time' in parsed or 'out_time_ms' in parsed:
+                            secs = 0.0
+                            if parsed.get('out_time_ms'):
+                                try:
+                                    secs = float(parsed.get('out_time_ms', 0)) / 1000000.0
+                                except Exception:
+                                    secs = 0.0
+                            elif parsed.get('out_time'):
+                                try:
+                                    parts = parsed.get('out_time', '0:00:00').split(':')
+                                    secs = float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+                                except Exception:
+                                    secs = 0.0
 
-                        frac = min(1.0, secs / max(1.0, meta.get('duration', 1.0)))
-                        overall = current_base_prog + (progress_per_target * frac)
+                            frac = min(1.0, secs / max(1.0, meta.get('duration', 1.0)))
+                            overall = current_base_prog + (progress_per_target * frac)
+                            speed = parsed.get('speed')
+                            eta = None
+                            if speed and speed.endswith('x'):
+                                try:
+                                    speed_val = float(speed[:-1])
+                                    if speed_val > 0.0:
+                                        eta_secs = (1.0 - frac) * meta.get('duration', 1.0) / speed_val
+                                        eta = time.strftime('%H:%M:%S', time.gmtime(max(0, eta_secs)))
+                                except Exception:
+                                    eta = None
+                            now_ts = time.time()
+                            if overall - last_reported >= 0.5 or (now_ts - last_update_ts) > 0.5:
+                                detail = f"Encoding variant {idx+1}/{len(targets)}: {target['label']}"
+                                if speed:
+                                    detail += f" — speed={speed}"
+                                if eta:
+                                    detail += f" — ETA {eta}"
+                                update_job_progress(job_id, f"Encoding variant {idx+1}/{len(targets)}: {target['label']}", overall, message=detail)
+                                last_reported = overall
+                                last_update_ts = now_ts
 
-                        # Add auxiliary info if available
-                        speed = parsed.get('speed')
-                        frame = parsed.get('frame')
-                        fps_val = parsed.get('fps')
-
-                        now_ts = time.time()
-                        # Throttle updates to avoid DB noise (at most twice per second)
-                        if overall - last_reported >= 0.5 or (now_ts - last_update_ts) > 0.5:
-                            msg = f"Encoding variant {idx+1}/{len(targets)}: {target['label']}"
-                            if speed:
-                                msg += f" — speed={speed}"
-                            if frame:
-                                msg += f" — frame={frame}"
-                            update_job_progress(job_id, msg, overall)
-                            last_reported = overall
-                            last_update_ts = now_ts
-
+                    if proc.poll() is not None and not line:
+                        break
                     if controller.should_cancel():
                         raise JobCancelled()
 
-                    if line.startswith('progress=') and line.split('=',1)[1] == 'end':
-                        variant_done = True
-
-                # Wait for completion and capture any errors
-                stderr = proc.stderr.read()
-                ret = proc.wait()
+                proc.wait()
+                stderr_thread.join(timeout=2)
+                ret = proc.returncode
+                stderr_text = ''.join(stderr_lines).strip()
                 if ret != 0:
-                    log_job(job_id, f"FFmpeg error for {target['label']}: {stderr[:400]}", level='ERROR')
-                    # attempt fallback simple transcode
-                    fallback_cmd = [ffmpeg_bin, '-y', '-i', source_file,
-                                    '-vf', f'scale={target["width"]}:{target["height"]}',
-                                    '-c:v', 'libx264', '-preset', 'ultrafast',
-                                    '-hls_time', str(segment_duration), '-hls_playlist_type', 'vod',
-                                    playlist_file]
-                    subprocess.run(fallback_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                else:
-                    log_job(job_id, f"Variant {target['label']} encoding complete")
+                    log_job(job_id, f"FFmpeg failed for {target['label']} (rc={ret})", level='ERROR')
+                    if stderr_text:
+                        log_job(job_id, f"FFmpeg stderr: {stderr_text[:400]}", level='ERROR')
+                    raise RuntimeError(f"FFmpeg failed for {target['label']} with exit code {ret}")
+
+                log_job(job_id, f"Variant {target['label']} encoding complete")
             except JobCancelled:
                 log_job(job_id, 'FFmpeg cancelled by request', level='WARNING')
                 raise
             except Exception as err:
-                log_job(job_id, f"FFmpeg warning for {target['label']}: {str(err)[:200]}", level='WARNING')
+                log_job(job_id, f"FFmpeg error for {target['label']}: {str(err)[:300]}", level='ERROR')
+                raise
 
             current_base_prog += progress_per_target
             update_job_progress(job_id, f"Encoded {target['label']}", current_base_prog)

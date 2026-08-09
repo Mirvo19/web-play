@@ -130,9 +130,10 @@ def upload_video_init():
     job = Job(
         video_id=video.id,
         job_type='transcode_and_upload',
-        status='processing',
+        status='receiving',
         current_step='Receiving upload',
-        current_message='Receiving file bytes from client'
+        current_message='Receiving file bytes from client',
+        progress=0.0
     )
     db.session.add(job)
     db.session.commit()
@@ -155,9 +156,9 @@ def upload_video_streamed(video_id):
     and updates Job.progress based on Content-Length when available.
     """
     video = Video.query.get_or_404(video_id)
-    job = Job.query.filter_by(video_id=video.id, status='processing').order_by(Job.created_at.desc()).first()
+    job = Job.query.filter_by(video_id=video.id, status='receiving').order_by(Job.created_at.desc()).first()
     if not job:
-        return jsonify({'error': 'No active job found for this video'}), 400
+        return jsonify({'error': 'No active upload job found for this video'}), 400
 
     upload_folder = current_app.config.get('UPLOAD_FOLDER', '/tmp/video-processing')
     work_dir = os.path.join(upload_folder, video.id)
@@ -178,6 +179,10 @@ def upload_video_streamed(video_id):
             f.save(save_path)
             bytes_written = os.path.getsize(save_path)
             video.original_size = bytes_written
+            job.status = 'queued'
+            job.current_step = 'Queued for processing'
+            job.current_message = 'Upload complete, awaiting background processing'
+            job.progress = 100.0
             db.session.commit()
             return jsonify({'message': 'Upload saved'}), 201
 
@@ -192,6 +197,12 @@ def upload_video_streamed(video_id):
                     break
                 out_f.write(chunk)
                 bytes_written += len(chunk)
+
+                # If the user has requested a cancellation while writing, abort immediately.
+                db.session.refresh(job)
+                if job.status == 'cancelled':
+                    out_f.flush()
+                    raise RuntimeError('Upload cancelled by user')
 
                 # Update Job progress periodically (every ~0.5s or when done)
                 now_ts = time.time()
@@ -209,6 +220,10 @@ def upload_video_streamed(video_id):
                     last_update = now_ts
 
         video.original_size = os.path.getsize(save_path)
+        job.status = 'queued'
+        job.current_step = 'Queued for processing'
+        job.current_message = 'Upload complete, awaiting background processing'
+        job.progress = 100.0
         db.session.commit()
 
         return jsonify({'message': 'Upload saved', 'size': video.original_size}), 201

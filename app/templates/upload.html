@@ -255,7 +255,14 @@
         const btn = document.getElementById('startUploadBtn');
         const cancelBtn = document.getElementById('cancelUploadBtn');
 
-        if (job.status === 'processing') {
+        if (job.status === 'receiving') {
+          btn.textContent = job.current_step || 'Receiving upload';
+          btn.disabled = true;
+          cancelBtn.disabled = false;
+          if (uploadToastId) {
+            updateToastProgress(uploadToastId, Math.round(job.progress), job.current_step || 'Receiving upload');
+          }
+        } else if (job.status === 'processing') {
           btn.textContent = job.current_step && job.progress < 100 ? `${job.current_step} — ${Math.round(job.progress)}%` : 'Processing...';
           btn.disabled = true;
           cancelBtn.disabled = false;
@@ -263,11 +270,11 @@
             updateToastProgress(uploadToastId, Math.round(job.progress), job.current_step);
           }
         } else if (job.status === 'queued') {
-          btn.textContent = 'Queued — Waiting...';
+          btn.textContent = 'Queued for processing';
           btn.disabled = true;
           cancelBtn.disabled = false;
         } else if (job.status === 'completed') {
-          btn.textContent = 'Upload Complete';
+          btn.textContent = 'Completed';
           btn.disabled = false;
           cancelBtn.disabled = true;
           showToast({ type: 'success', title: 'Job completed', message: 'Processing finished successfully' });

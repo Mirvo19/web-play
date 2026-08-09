@@ -30,7 +30,7 @@ class Config:
     SUPABASE_SERVICE_ROLE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '')
 
     # Video Processing
-    UPLOAD_FOLDER = os.environ.get('UPLOAD_FOLDER', os.path.join(os.getcwd(), 'tmp_video_processing'))
+    UPLOAD_FOLDER = os.environ.get('UPLOAD_FOLDER', '/tmp/video-processing')
     MAX_CONTENT_LENGTH = 16 * 1024 * 1024 * 1024  # 16 GB max streaming payload
     HLS_SEGMENT_DURATION = int(os.environ.get('HLS_SEGMENT_DURATION', 6))
     DEFAULT_FFMPEG_THREADS = int(os.environ.get('DEFAULT_FFMPEG_THREADS', 40))
