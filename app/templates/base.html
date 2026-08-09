@@ -82,15 +82,154 @@
   </div>
 
   <script>
+    /* Toast system: showToast / showProgressToast / updateToastProgress / closeToast */
+    (function(){
+      const TOAST_CONTAINER_ID = 'hc_toast_container';
+      function ensureContainer(){
+        let c = document.getElementById(TOAST_CONTAINER_ID);
+        if(!c){
+          c = document.createElement('div');
+          c.id = TOAST_CONTAINER_ID;
+          c.style.position = 'fixed';
+          c.style.right = '16px';
+          c.style.top = '16px';
+          c.style.zIndex = 99999;
+          c.style.display = 'flex';
+          c.style.flexDirection = 'column';
+          c.style.gap = '10px';
+          document.body.appendChild(c);
+        }
+        return c;
+      }
+
+      function makeToastEl(id, type, title, message, withProgress){
+        const el = document.createElement('div');
+        el.className = 'hc-toast';
+        el.dataset.toastId = id;
+        el.style.minWidth = '260px';
+        el.style.maxWidth = '380px';
+        el.style.background = 'var(--color-card, #111)';
+        el.style.color = 'var(--color-fg, #eee)';
+        el.style.padding = '12px';
+        el.style.borderRadius = '8px';
+        el.style.boxShadow = '0 6px 18px rgba(0,0,0,0.5)';
+        el.style.fontSize = '0.9rem';
+        el.style.borderLeft = type === 'error' ? '4px solid #e74c3c' : (type === 'success' ? '4px solid #2ecc71' : '4px solid #3498db');
+
+        const header = document.createElement('div');
+        header.style.display = 'flex';
+        header.style.justifyContent = 'space-between';
+        header.style.alignItems = 'center';
+
+        const t = document.createElement('div');
+        t.style.fontWeight = '700';
+        t.textContent = title || '';
+        header.appendChild(t);
+
+        const btn = document.createElement('button');
+        btn.innerHTML = '&times;';
+        btn.style.background = 'transparent';
+        btn.style.border = 'none';
+        btn.style.color = 'inherit';
+        btn.style.cursor = 'pointer';
+        btn.onclick = () => { el.remove(); };
+        header.appendChild(btn);
+
+        el.appendChild(header);
+
+        if(message){
+          const msg = document.createElement('div');
+          msg.style.marginTop = '6px';
+          msg.style.opacity = '0.9';
+          msg.textContent = message;
+          el.appendChild(msg);
+        }
+
+        if(withProgress){
+          const barWrap = document.createElement('div');
+          barWrap.style.background = 'rgba(255,255,255,0.06)';
+          barWrap.style.height = '8px';
+          barWrap.style.borderRadius = '6px';
+          barWrap.style.marginTop = '10px';
+          barWrap.style.overflow = 'hidden';
+          const fill = document.createElement('div');
+          fill.className = 'hc-toast-progress';
+          fill.style.width = '0%';
+          fill.style.height = '100%';
+          fill.style.background = 'linear-gradient(90deg,#4aa3ff,#6ee7b7)';
+          fill.style.transition = 'width 300ms linear';
+          barWrap.appendChild(fill);
+          el.appendChild(barWrap);
+        }
+
+        return el;
+      }
+
+      window.showToast = function(opts){
+        const id = 't_' + Math.random().toString(36).slice(2,9);
+        const container = ensureContainer();
+        const el = makeToastEl(id, opts.type || 'info', opts.title || '', opts.message || '', false);
+        container.appendChild(el);
+        if(opts.autoDismiss !== false){
+          const ttl = opts.duration || 5000;
+          setTimeout(()=>{ try{ el.remove(); }catch(e){} }, ttl);
+        }
+        return id;
+      };
+
+      window.showProgressToast = function(opts){
+        const id = opts.id || ('tp_' + Math.random().toString(36).slice(2,9));
+        const container = ensureContainer();
+        const el = makeToastEl(id, opts.type || 'info', opts.title || '', opts.message || '', true);
+        container.appendChild(el);
+        if(opts.autoDismiss === true){
+          const ttl = opts.duration || 5000;
+          setTimeout(()=>{ try{ el.remove(); }catch(e){} }, ttl);
+        }
+        return id;
+      };
+
+      window.updateToastProgress = function(id, pct, message){
+        const el = document.querySelector(`[data-toast-id="${id}"]`);
+        if(!el) return;
+        const fill = el.querySelector('.hc-toast-progress');
+        if(fill){ fill.style.width = Math.max(0, Math.min(100, pct)) + '%'; }
+        if(message){
+          const msg = el.querySelector('div:nth-child(2)');
+          if(msg) msg.textContent = message;
+        }
+      };
+
+      window.closeToast = function(id){
+        const el = document.querySelector(`[data-toast-id="${id}"]`);
+        if(el) el.remove();
+      };
+    })();
     // Live JWT Session Countdown Timer Logic
     async function updateSessionCountdown() {
       try {
-        const resp = await fetch('/auth/api/auth/session');
-        if (resp.status === 401) {
-          window.location.href = '/login';
-          return;
-        }
-        const data = await resp.json();
+          const resp = await fetch('/auth/api/auth/session');
+          if (resp.status === 401) {
+            window.location.href = '/login';
+            return;
+          }
+          if (!resp.ok) {
+            // Endpoint missing or server error — avoid trying to parse HTML as JSON
+            console.warn('Session endpoint returned', resp.status);
+            return;
+          }
+          const ct = resp.headers.get('content-type') || '';
+          if (!ct.includes('application/json')) {
+            console.warn('Session endpoint did not return JSON, content-type:', ct);
+            return;
+          }
+          let data = null;
+          try {
+            data = await resp.json();
+          } catch (e) {
+            console.error('Session update parse error:', e);
+            return;
+          }
         if (!data.authenticated) {
           window.location.href = '/login';
           return;

@@ -94,6 +94,7 @@
   let activeJobId = null;
   let logPollInterval = null;
   let jobStatus = null;
+  let uploadToastId = null;
 
   // Resume polling if an active job exists in localStorage
   window.addEventListener('load', () => {
@@ -129,21 +130,76 @@
     formData.append('cdn_account_id', cdnAccountId);
 
     try {
-      const resp = await fetch('/api/videos/upload', {
-        method: 'POST',
-        body: formData
-      });
+      // Step 1: initialize Video + Job on server and get upload URL
+      const initForm = new FormData();
+      initForm.append('title', title);
+      initForm.append('description', description);
+      initForm.append('cdn_account_id', cdnAccountId);
+      initForm.append('filename', file.name);
 
-      const data = await resp.json();
-        if (resp.ok) {
-          activeJobId = data.job_id;
-          localStorage.setItem('hc_active_job_id', activeJobId);
-          startLogPolling(activeJobId);
-        } else {
-        alert("Upload error: " + (data.error || "Failed to start upload"));
+      const initResp = await fetch('/api/videos/upload/init', {
+        method: 'POST',
+        body: initForm
+      });
+      const initData = await initResp.json();
+      if (!initResp.ok) {
+        alert('Failed to initialize upload: ' + (initData.error || initData.message || ''));
         btn.disabled = false;
         btn.textContent = 'Start Upload & Processing';
+        return;
       }
+
+      activeJobId = initData.job_id;
+      localStorage.setItem('hc_active_job_id', activeJobId);
+      document.getElementById('pipelineContainer').style.display = 'block';
+      startLogPolling(activeJobId);
+
+      // Step 2: perform an XMLHttpRequest so we can show upload progress accurately
+      const xhr = new XMLHttpRequest();
+      xhr.open('PUT', initData.upload_url, true);
+
+      // create a persistent toast for upload
+      uploadToastId = showProgressToast({ title: 'Uploading source', message: 'Starting upload...', autoDismiss: false });
+
+      xhr.upload.onprogress = function(ev) {
+        if (ev.lengthComputable) {
+          const pct = Math.round((ev.loaded / ev.total) * 100);
+          document.getElementById('pipelineProgressBar').style.width = pct + '%';
+          document.getElementById('pipelineProgressText').textContent = pct + '%';
+          document.getElementById('pipelineStepText').textContent = 'Uploading source video';
+          btn.textContent = `Uploading... ${pct}%`;
+          updateToastProgress(uploadToastId, pct, `${(ev.loaded/1024/1024).toFixed(2)} MB / ${(ev.total/1024/1024).toFixed(2)} MB`);
+        } else {
+          document.getElementById('pipelineStepText').textContent = 'Uploading source video (sending...)';
+          updateToastProgress(uploadToastId, 10, 'Sending...');
+        }
+      };
+
+      xhr.onload = function() {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          btn.textContent = 'Upload complete — queued for processing';
+          btn.disabled = true;
+          updateToastProgress(uploadToastId, 100, 'Upload complete — queued');
+          setTimeout(()=> closeToast(uploadToastId), 900);
+        } else {
+          showToast({ type: 'error', title: 'Upload failed', message: xhr.responseText || 'Upload error' });
+          closeToast(uploadToastId);
+          btn.disabled = false;
+          btn.textContent = 'Start Upload & Processing';
+          localStorage.removeItem('hc_active_job_id');
+        }
+      };
+
+      xhr.onerror = function() {
+        showToast({ type: 'error', title: 'Network error', message: 'Network error during upload' });
+        closeToast(uploadToastId);
+        btn.disabled = false;
+        btn.textContent = 'Start Upload & Processing';
+        localStorage.removeItem('hc_active_job_id');
+      };
+
+      xhr.send(file);
+
     } catch (err) {
       alert("Network error streaming file upload.");
       btn.disabled = false;
@@ -172,15 +228,25 @@
         if (job.status === 'processing') {
           btn.textContent = job.current_step && job.progress < 100 ? `${job.current_step} — ${Math.round(job.progress)}%` : 'Processing...';
           btn.disabled = true;
+          // show a single toast for job completion/failure
+          if(job.status === 'processing'){
+            // update a job-level progress toast if present
+            if(typeof uploadToastId !== 'undefined' && uploadToastId){
+              updateToastProgress(uploadToastId, Math.round(job.progress), job.current_step);
+            }
         } else if (job.status === 'queued') {
           btn.textContent = 'Queued — Waiting...';
           btn.disabled = true;
         } else if (job.status === 'completed') {
           btn.textContent = 'Upload Complete';
           btn.disabled = false;
+          showToast({ type: 'success', title: 'Job completed', message: 'Processing finished successfully' });
+          if(uploadToastId) closeToast(uploadToastId);
         } else if (job.status === 'failed') {
           btn.textContent = 'Processing Failed';
           btn.disabled = false;
+          showToast({ type: 'error', title: 'Job failed', message: job.error_message || 'Processing failed' });
+          if(uploadToastId) closeToast(uploadToastId);
         }
 
         // Update explicit stage indicators based on job.current_step and logs

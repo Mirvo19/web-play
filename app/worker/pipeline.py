@@ -146,6 +146,8 @@ def execute_video_pipeline(job_id: str):
                 proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 variant_done = False
                 last_reported = 0.0
+                parsed = {}
+                last_update_ts = time.time()
 
                 # Read stdout lines for progress info
                 while True:
@@ -155,22 +157,46 @@ def execute_video_pipeline(job_id: str):
                             break
                         continue
                     line = line.strip()
-                    if line.startswith('out_time='):
-                        # Parse HH:MM:SS.micro
-                        t = line.split('=', 1)[1]
-                        parts = t.split(':')
-                        try:
-                            secs = float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
-                        except Exception:
-                            secs = 0.0
-                        # Compute local progress fraction for this variant
+                    if '=' in line:
+                        k, v = line.split('=', 1)
+                        parsed[k.strip()] = v.strip()
+
+                    # When we see a progress= entry or regularly, compute and update
+                    if 'out_time' in parsed or 'out_time_ms' in parsed or ('progress' in parsed and parsed.get('progress') == 'continue'):
+                        # Prefer out_time_ms when present
+                        secs = 0.0
+                        if 'out_time_ms' in parsed:
+                            try:
+                                secs = float(parsed.get('out_time_ms', 0)) / 1000000.0
+                            except Exception:
+                                secs = 0.0
+                        elif 'out_time' in parsed:
+                            try:
+                                parts = parsed.get('out_time', '0:00:00').split(':')
+                                secs = float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+                            except Exception:
+                                secs = 0.0
+
                         frac = min(1.0, secs / max(1.0, meta.get('duration', 1.0)))
-                        # Map into overall job progress range
                         overall = current_base_prog + (progress_per_target * frac)
-                        # Avoid excessive writes
-                        if overall - last_reported >= 0.5:
-                            update_job_progress(job_id, f"Encoding variant {idx+1}/{len(targets)}: {target['label']}", overall)
+
+                        # Add auxiliary info if available
+                        speed = parsed.get('speed')
+                        frame = parsed.get('frame')
+                        fps_val = parsed.get('fps')
+
+                        now_ts = time.time()
+                        # Throttle updates to avoid DB noise (at most twice per second)
+                        if overall - last_reported >= 0.5 or (now_ts - last_update_ts) > 0.5:
+                            msg = f"Encoding variant {idx+1}/{len(targets)}: {target['label']}"
+                            if speed:
+                                msg += f" — speed={speed}"
+                            if frame:
+                                msg += f" — frame={frame}"
+                            update_job_progress(job_id, msg, overall)
                             last_reported = overall
+                            last_update_ts = now_ts
+
                     if line.startswith('progress=') and line.split('=',1)[1] == 'end':
                         variant_done = True
 
@@ -188,7 +214,6 @@ def execute_video_pipeline(job_id: str):
                     subprocess.run(fallback_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 else:
                     log_job(job_id, f"Variant {target['label']} encoding complete")
-
             except Exception as err:
                 log_job(job_id, f"FFmpeg warning for {target['label']}: {str(err)[:200]}", level='WARNING')
 
@@ -217,16 +242,30 @@ def execute_video_pipeline(job_id: str):
         # Step 6: Upload Segments & Playlists to CDN
         uploaded_files_count = 0
         total_files_to_upload = 0
+        total_bytes_to_upload = 0
         for target, v_dir, _ in variant_dirs:
             if os.path.exists(v_dir):
-                total_files_to_upload += len(os.listdir(v_dir))
-        total_files_to_upload += 2  # master.m3u8 + thumbnail
+                for fn in os.listdir(v_dir):
+                    total_files_to_upload += 1
+                    try:
+                        total_bytes_to_upload += os.path.getsize(os.path.join(v_dir, fn))
+                    except Exception:
+                        pass
+        # include master + thumbnail
+        try:
+            total_files_to_upload += 2
+            total_bytes_to_upload += os.path.getsize(master_playlist_path) if os.path.exists(master_playlist_path) else 0
+            total_bytes_to_upload += os.path.getsize(thumb_local_path) if os.path.exists(thumb_local_path) else 0
+        except Exception:
+            pass
 
-        log_job(job_id, f"Total payload files to upload to CDN: {total_files_to_upload}")
+        log_job(job_id, f"Total payload files to upload to CDN: {total_files_to_upload} (~{round(total_bytes_to_upload/1024/1024,2)} MB)")
 
         # Upload Thumbnail first
         thumb_cdn_url = ""
+        bytes_uploaded = 0
         if os.path.exists(thumb_local_path):
+            update_job_progress(job_id, f"Uploading to CDN — thumbnail", 55.0)
             res = cdn_provider.upload_file(thumb_local_path, f"thumb_{video.id}.jpg")
             thumb_cdn_url = res['url']
             v_file = VideoFile(
@@ -239,9 +278,11 @@ def execute_video_pipeline(job_id: str):
                 upload_status='uploaded'
             )
             db.session.add(v_file)
+            bytes_uploaded += res.get('file_size', 0)
 
         # Upload Variants
         variant_master_urls = {}
+        files_processed = 0
         for target, v_dir, playlist_file in variant_dirs:
             if not os.path.exists(v_dir):
                 continue
@@ -265,6 +306,8 @@ def execute_video_pipeline(job_id: str):
             for s_file in segment_files:
                 s_path = os.path.join(v_dir, s_file)
                 remote_name = f"{video.id}/{target['label']}/{s_file}"
+                # Update current file state
+                update_job_progress(job_id, f"Uploading to CDN — {files_processed+1}/{total_files_to_upload}: {target['label']}/{s_file}", 55.0 + (30.0 * (bytes_uploaded / max(1, total_bytes_to_upload))))
                 res = cdn_provider.upload_file(s_path, remote_name)
                 v_file = VideoFile(
                     video_id=video.id,
@@ -278,15 +321,20 @@ def execute_video_pipeline(job_id: str):
                 )
                 db.session.add(v_file)
                 uploaded_files_count += 1
-                if uploaded_files_count % 10 == 0 or uploaded_files_count == total_files_to_upload:
-                    prog = 55.0 + (30.0 * (uploaded_files_count / max(1, total_files_to_upload)))
-                    update_job_progress(job_id, "Uploading segments to CDN", prog)
-                    log_job(job_id, f"Uploaded segment {uploaded_files_count} / {total_files_to_upload}")
+                files_processed += 1
+                bytes_uploaded += res.get('file_size', 0)
+
+                # Periodic progress update and logging
+                if files_processed % 5 == 0 or files_processed == total_files_to_upload:
+                    prog = 55.0 + (30.0 * (bytes_uploaded / max(1, total_bytes_to_upload))) if total_bytes_to_upload > 0 else 55.0 + (30.0 * (files_processed / max(1, total_files_to_upload)))
+                    update_job_progress(job_id, f"Uploading segments to CDN", prog)
+                    log_job(job_id, f"Uploaded {files_processed} / {total_files_to_upload} files to CDN")
 
             # Upload variant playlist.m3u8
             for p_file in playlist_files:
                 p_path = os.path.join(v_dir, p_file)
                 remote_name = f"{video.id}/{target['label']}/{p_file}"
+                update_job_progress(job_id, f"Uploading to CDN — playlist {target['label']}", 55.0 + (30.0 * (bytes_uploaded / max(1, total_bytes_to_upload))))
                 res = cdn_provider.upload_file(p_path, remote_name)
                 v_record.playlist_url = res['url']
                 v_file = VideoFile(
@@ -300,6 +348,8 @@ def execute_video_pipeline(job_id: str):
                     upload_status='uploaded'
                 )
                 db.session.add(v_file)
+                files_processed += 1
+                bytes_uploaded += res.get('file_size', 0)
 
         # Step 7: Upload Master Playlist
         master_res = cdn_provider.upload_file(master_playlist_path, f"{video.id}/master.m3u8")

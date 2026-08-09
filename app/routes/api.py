@@ -92,6 +92,129 @@ def upload_video_stream():
     }), 202
 
 
+@api_bp.route('/videos/upload/init', methods=['POST'])
+@login_required
+def upload_video_init():
+    """
+    Initialize a Video + Job and return an upload URL for streamed PUT upload.
+    This allows the client to begin uploading and show live server-side progress.
+    """
+    title = request.form.get('title', '').strip()
+    description = request.form.get('description', '').strip()
+    cdn_account_id = request.form.get('cdn_account_id', '').strip()
+    filename = request.form.get('filename', '').strip()
+
+    if not cdn_account_id:
+        return jsonify({'error': 'CDN Account selection is required'}), 400
+
+    cdn_account = CDNAccount.query.get(cdn_account_id)
+    if not cdn_account or not cdn_account.enabled:
+        return jsonify({'error': 'Selected CDN Account is invalid or disabled'}), 400
+
+    if not filename:
+        return jsonify({'error': 'Filename is required'}), 400
+
+    # Create Video record (status processing while upload proceeds)
+    video = Video(
+        title=title or filename,
+        description=description,
+        original_filename=filename,
+        cdn_account_id=cdn_account.id,
+        status='processing'
+    )
+    db.session.add(video)
+    db.session.commit()
+
+    # Create Job immediately so client can poll job state during upload
+    job = Job(
+        video_id=video.id,
+        job_type='transcode_and_upload',
+        status='processing',
+        current_step='Receiving upload',
+        current_message='Receiving file bytes from client'
+    )
+    db.session.add(job)
+    db.session.commit()
+
+    upload_url = f"/api/videos/{video.id}/upload"
+    return jsonify({
+        'message': 'Upload initialized',
+        'video_id': video.id,
+        'job_id': job.id,
+        'upload_url': upload_url
+    }), 201
+
+
+@api_bp.route('/videos/<video_id>/upload', methods=['PUT', 'POST'])
+@login_required
+def upload_video_streamed(video_id):
+    """
+    Receive raw streamed upload for an initialized video. Expects raw body bytes
+    (PUT) or multipart/form-data (POST). This handler writes to disk in chunks
+    and updates Job.progress based on Content-Length when available.
+    """
+    video = Video.query.get_or_404(video_id)
+    job = Job.query.filter_by(video_id=video.id, status='processing').order_by(Job.created_at.desc()).first()
+    if not job:
+        return jsonify({'error': 'No active job found for this video'}), 400
+
+    upload_folder = current_app.config.get('UPLOAD_FOLDER', '/tmp/video-processing')
+    work_dir = os.path.join(upload_folder, video.id)
+    os.makedirs(work_dir, exist_ok=True)
+    filename = video.original_filename or 'source.mp4'
+    save_path = os.path.join(work_dir, filename)
+
+    # Try to determine content length
+    try:
+        total_bytes = int(request.headers.get('Content-Length') or 0)
+    except Exception:
+        total_bytes = 0
+
+    try:
+        # If this is a multipart/form-data POST coming from older clients, fall back
+        if 'file' in request.files:
+            f = request.files['file']
+            f.save(save_path)
+            bytes_written = os.path.getsize(save_path)
+            video.original_size = bytes_written
+            db.session.commit()
+            return jsonify({'message': 'Upload saved'}), 201
+
+        # Stream raw body in chunks
+        chunk_size = 64 * 1024
+        bytes_written = 0
+        last_update = 0
+        with open(save_path, 'wb') as out_f:
+            while True:
+                chunk = request.stream.read(chunk_size)
+                if not chunk:
+                    break
+                out_f.write(chunk)
+                bytes_written += len(chunk)
+
+                # Update Job progress periodically (every ~0.5s or when done)
+                now_ts = time.time()
+                if total_bytes > 0:
+                    prog = min(100.0, (bytes_written / float(max(1, total_bytes))) * 100.0 * 0.8)
+                else:
+                    # Unknown total length — use heuristics: show receiving step at 10%..80%
+                    prog = min(80.0, 5.0 + (bytes_written / (1024 * 1024)) * 0.5)
+
+                if now_ts - last_update > 0.5 or bytes_written == total_bytes:
+                    job.current_step = 'Receiving upload'
+                    job.current_message = f"Receiving {bytes_written} bytes"
+                    job.progress = prog
+                    db.session.commit()
+                    last_update = now_ts
+
+        video.original_size = os.path.getsize(save_path)
+        db.session.commit()
+
+        return jsonify({'message': 'Upload saved', 'size': video.original_size}), 201
+    except Exception as e:
+        return jsonify({'error': f'Failed to save upload: {str(e)}'}), 500
+
+
 @api_bp.route('/videos/<video_id>', methods=['DELETE'])
 @login_required
 def delete_video_api(video_id):

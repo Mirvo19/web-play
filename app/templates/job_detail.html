@@ -33,14 +33,29 @@
 
 <script>
   const jobId = "{{ job.id }}";
+  let _jobDetailToastId = null;
   setInterval(async () => {
     try {
       const resp = await fetch(`/api/jobs/${jobId}/logs`);
       if (!resp.ok) return;
       const data = await resp.json();
       const logs = data.logs;
+      const job = data.job;
       const logBox = document.getElementById('jobDetailLogBox');
       logBox.textContent = logs.map(l => l.message).join('\n');
+
+      if(job.status === 'processing'){
+        if(!_jobDetailToastId) _jobDetailToastId = showProgressToast({ title: 'Job running', message: job.current_step || 'Processing...', autoDismiss: false });
+        updateToastProgress(_jobDetailToastId, Math.round(job.progress||0), job.current_step || 'Processing...');
+      } else if(job.status === 'completed'){
+        showToast({ type: 'success', title: 'Job completed', message: 'Job finished successfully' });
+        if(_jobDetailToastId) closeToast(_jobDetailToastId);
+        _jobDetailToastId = null;
+      } else if(job.status === 'failed'){
+        showToast({ type: 'error', title: 'Job failed', message: job.error_message || 'Job failed' });
+        if(_jobDetailToastId) closeToast(_jobDetailToastId);
+        _jobDetailToastId = null;
+      }
     } catch (e) {}
   }, 2000);
 </script>
