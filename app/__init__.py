@@ -6,6 +6,7 @@ from app.auth import auth_bp
 from app.routes.views import views_bp
 from app.routes.api import api_bp
 from app.worker.background import start_background_worker
+import shutil
 
 def create_app(config_class=Config):
     app = Flask(__name__)
@@ -55,5 +56,25 @@ def create_app(config_class=Config):
 
         # Start persistent background worker thread
         start_background_worker(app)
+
+        # Discover FFmpeg and FFprobe executables (use absolute paths when available)
+        ffmpeg_path = os.environ.get('FFMPEG_BIN') or shutil.which('ffmpeg')
+        ffprobe_path = os.environ.get('FFPROBE_BIN') or shutil.which('ffprobe')
+        app.config['FFMPEG_BINARY'] = ffmpeg_path or 'ffmpeg'
+        app.config['FFPROBE_BINARY'] = ffprobe_path or 'ffprobe'
+
+        # Persist discovered paths into settings for visibility (non-blocking)
+        try:
+            if ffmpeg_path:
+                Setting.set('ffmpeg_path', ffmpeg_path)
+            else:
+                Setting.set('ffmpeg_path', '')
+            if ffprobe_path:
+                Setting.set('ffprobe_path', ffprobe_path)
+            else:
+                Setting.set('ffprobe_path', '')
+        except Exception:
+            # Do not fail startup for inability to persist settings
+            pass
 
     return app

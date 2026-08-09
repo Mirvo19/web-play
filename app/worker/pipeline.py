@@ -13,6 +13,8 @@ from app.worker.ffmpeg_processor import (
     build_ffmpeg_transcode_command,
     extract_thumbnail
 )
+import shutil
+import threading
 
 def log_job(job_id: str, message: str, level: str = 'INFO', metadata: str = None):
     """Write timestamped log entry to JobLog table."""
@@ -82,6 +84,21 @@ def execute_video_pipeline(job_id: str):
         update_job_progress(job_id, "Inspecting video", 10.0)
 
         # Step 2: Inspect video metadata
+        # Verify ffmpeg and ffprobe availability before proceeding
+        ffmpeg_bin = current_app.config.get('FFMPEG_BINARY') or shutil.which('ffmpeg')
+        ffprobe_bin = current_app.config.get('FFPROBE_BINARY') or shutil.which('ffprobe')
+
+        if not ffmpeg_bin or shutil.which(ffmpeg_bin) is None and not os.path.isabs(ffmpeg_bin):
+            msg = "FFmpeg is not installed or cannot be found on the server."
+            log_job(job_id, msg, level='ERROR')
+            # Log which executables were (not) found
+            log_job(job_id, f"FFmpeg executable: {ffmpeg_bin or 'Not found'}", level='ERROR')
+            log_job(job_id, f"FFprobe executable: {ffprobe_bin or 'Not found'}", level='ERROR')
+            job.status = 'failed'
+            job.error_message = 'FFmpeg/FFprobe not available on server.'
+            db.session.commit()
+            return
+
         log_job(job_id, "Inspecting source media with ffprobe")
         meta = inspect_video(source_file)
         video.source_width = meta['width']
@@ -119,22 +136,61 @@ def execute_video_pipeline(job_id: str):
             cmd, playlist_file, pattern = build_ffmpeg_transcode_command(
                 source_file, v_dir, target, threads, preset, crf, segment_duration
             )
+            # Ensure the ffmpeg binary is the one resolved earlier
+            cmd[0] = ffmpeg_bin
+
             log_job(job_id, f"Encoding variant {target['label']} ({target['width']}x{target['height']})")
-            
+
+            # Run ffmpeg and parse its -progress pipe:1 output to compute real-time progress
             try:
-                subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-                log_job(job_id, f"Variant {target['label']} encoding complete")
-            except subprocess.CalledProcessError as err:
-                log_job(job_id, f"FFmpeg warning for {target['label']}: {err.stderr.decode('utf-8', 'ignore')[:200]}", level='WARNING')
-                # If FFmpeg fails, try direct simple transcode fallback
-                fallback_cmd = [
-                    'ffmpeg', '-y', '-i', source_file,
-                    '-vf', f'scale={target["width"]}:{target["height"]}',
-                    '-c:v', 'libx264', '-preset', 'ultrafast',
-                    '-hls_time', str(segment_duration), '-hls_playlist_type', 'vod',
-                    playlist_file
-                ]
-                subprocess.run(fallback_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                variant_done = False
+                last_reported = 0.0
+
+                # Read stdout lines for progress info
+                while True:
+                    line = proc.stdout.readline()
+                    if not line:
+                        if proc.poll() is not None:
+                            break
+                        continue
+                    line = line.strip()
+                    if line.startswith('out_time='):
+                        # Parse HH:MM:SS.micro
+                        t = line.split('=', 1)[1]
+                        parts = t.split(':')
+                        try:
+                            secs = float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+                        except Exception:
+                            secs = 0.0
+                        # Compute local progress fraction for this variant
+                        frac = min(1.0, secs / max(1.0, meta.get('duration', 1.0)))
+                        # Map into overall job progress range
+                        overall = current_base_prog + (progress_per_target * frac)
+                        # Avoid excessive writes
+                        if overall - last_reported >= 0.5:
+                            update_job_progress(job_id, f"Encoding variant {idx+1}/{len(targets)}: {target['label']}", overall)
+                            last_reported = overall
+                    if line.startswith('progress=') and line.split('=',1)[1] == 'end':
+                        variant_done = True
+
+                # Wait for completion and capture any errors
+                stderr = proc.stderr.read()
+                ret = proc.wait()
+                if ret != 0:
+                    log_job(job_id, f"FFmpeg error for {target['label']}: {stderr[:400]}", level='ERROR')
+                    # attempt fallback simple transcode
+                    fallback_cmd = [ffmpeg_bin, '-y', '-i', source_file,
+                                    '-vf', f'scale={target["width"]}:{target["height"]}',
+                                    '-c:v', 'libx264', '-preset', 'ultrafast',
+                                    '-hls_time', str(segment_duration), '-hls_playlist_type', 'vod',
+                                    playlist_file]
+                    subprocess.run(fallback_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                else:
+                    log_job(job_id, f"Variant {target['label']} encoding complete")
+
+            except Exception as err:
+                log_job(job_id, f"FFmpeg warning for {target['label']}: {str(err)[:200]}", level='WARNING')
 
             current_base_prog += progress_per_target
             update_job_progress(job_id, f"Encoded {target['label']}", current_base_prog)

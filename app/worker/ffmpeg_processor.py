@@ -1,7 +1,7 @@
 import os
 import json
 import subprocess
-import re
+import shutil
 from typing import Dict, Any, List, Tuple
 
 RESOLUTION_LADDER = [
@@ -16,29 +16,22 @@ RESOLUTION_LADDER = [
 
 def inspect_video(file_path: str) -> Dict[str, Any]:
     """Inspect video file metadata using ffprobe."""
+    ffprobe_bin = shutil.which('ffprobe')
+    if not ffprobe_bin:
+        raise RuntimeError('FFprobe executable not found. Please install ffprobe or set full path in FFMPEG_BIN/FFPROBE_BIN environment variables.')
+
     cmd = [
-        'ffprobe',
+        ffprobe_bin,
         '-v', 'quiet',
         '-print_format', 'json',
         '-show_format',
         '-show_streams',
         file_path
     ]
-    try:
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
-        probe_data = json.loads(result.stdout)
-    except Exception as e:
-        # Fallback inspection if ffprobe is not installed or errors out
-        file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
-        return {
-            'width': 1920,
-            'height': 1080,
-            'duration': 120.0,
-            'fps': 30.0,
-            'bitrate': 2500000,
-            'size': file_size,
-            'has_audio': True
-        }
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffprobe failed: {result.stderr.strip()}")
+    probe_data = json.loads(result.stdout)
 
     width = 1920
     height = 1080
@@ -139,8 +132,9 @@ def build_ffmpeg_transcode_command(
     width = target['width']
     height = target['height']
 
+    ffmpeg_bin = shutil.which('ffmpeg') or 'ffmpeg'
     cmd = [
-        'ffmpeg',
+        ffmpeg_bin,
         '-y',
         '-progress', 'pipe:1',
         '-threads', str(threads),
@@ -167,8 +161,9 @@ def build_ffmpeg_transcode_command(
 def extract_thumbnail(input_path: str, output_path: str, timestamp_sec: float = 1.0) -> bool:
     """Extract a thumbnail image at given timestamp."""
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    ffmpeg_bin = shutil.which('ffmpeg') or 'ffmpeg'
     cmd = [
-        'ffmpeg',
+        ffmpeg_bin,
         '-y',
         '-ss', str(timestamp_sec),
         '-i', input_path,
@@ -177,7 +172,7 @@ def extract_thumbnail(input_path: str, output_path: str, timestamp_sec: float = 
         output_path
     ]
     try:
-        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-        return os.path.exists(output_path)
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return result.returncode == 0 and os.path.exists(output_path)
     except Exception:
         return False

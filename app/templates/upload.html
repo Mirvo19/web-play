@@ -69,13 +69,17 @@
       </div>
 
       <!-- Stage Checklist -->
-      <div style="display: flex; flex-direction: column; gap: 0.4rem; font-size: 0.85rem; margin-bottom: 1.25rem;">
-        <div id="stage-receive" style="color: var(--color-muted);">[ ] Receiving & streaming to disk</div>
-        <div id="stage-inspect" style="color: var(--color-muted);">[ ] Inspecting media metadata (resolution, FPS, duration)</div>
-        <div id="stage-transcode" style="color: var(--color-muted);">[ ] Transcoding Original + Step Down HLS variants</div>
-        <div id="stage-upload-cdn" style="color: var(--color-muted);">[ ] Uploading HLS segments & playlists to CDN</div>
-        <div id="stage-verify" style="color: var(--color-muted);">[ ] Verifying remote CDN files</div>
-        <div id="stage-cleanup" style="color: var(--color-muted);">[ ] Reclaiming local server disk space</div>
+      <div id="pipelineStages" style="display: flex; flex-direction: column; gap: 0.4rem; font-size: 0.85rem; margin-bottom: 1.25rem;">
+        <div id="stage-receive" data-stage="Receiving file" data-state="pending" class="stage-item">[ ] Receiving upload</div>
+        <div id="stage-validate" data-stage="Validating file" data-state="pending" class="stage-item">[ ] Validating file</div>
+        <div id="stage-inspect" data-stage="Inspecting video" data-state="pending" class="stage-item">[ ] Inspecting media metadata (resolution, FPS, duration)</div>
+        <div id="stage-profiles" data-stage="Determining quality profiles" data-state="pending" class="stage-item">[ ] Determining quality profiles</div>
+        <div id="stage-transcode" data-stage="Encoding video variants" data-state="pending" class="stage-item">[ ] Encoding Original + Step Down HLS variants</div>
+        <div id="stage-hls" data-stage="Generating HLS" data-state="pending" class="stage-item">[ ] Generating HLS master playlist</div>
+        <div id="stage-upload-cdn" data-stage="Uploading to CDN" data-state="pending" class="stage-item">[ ] Uploading HLS segments & playlists to CDN</div>
+        <div id="stage-verify" data-stage="Verifying CDN files" data-state="pending" class="stage-item">[ ] Verifying remote CDN files</div>
+        <div id="stage-cleanup" data-stage="Cleaning local server" data-state="pending" class="stage-item">[ ] Reclaiming local server disk space</div>
+        <div id="stage-complete" data-stage="Complete" data-state="pending" class="stage-item">[ ] Completed</div>
       </div>
     </div>
 
@@ -89,6 +93,17 @@
 <script>
   let activeJobId = null;
   let logPollInterval = null;
+  let jobStatus = null;
+
+  // Resume polling if an active job exists in localStorage
+  window.addEventListener('load', () => {
+    const stored = localStorage.getItem('hc_active_job_id');
+    if (stored) {
+      activeJobId = stored;
+      document.getElementById('pipelineContainer').style.display = 'block';
+      startLogPolling(activeJobId);
+    }
+  });
 
   document.getElementById('uploadForm').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -103,7 +118,7 @@
 
     const btn = document.getElementById('startUploadBtn');
     btn.disabled = true;
-    btn.textContent = 'Streaming file to disk...';
+    btn.textContent = 'Uploading... 0%';
 
     document.getElementById('pipelineContainer').style.display = 'block';
 
@@ -120,10 +135,11 @@
       });
 
       const data = await resp.json();
-      if (resp.ok) {
-        activeJobId = data.job_id;
-        startLogPolling(activeJobId);
-      } else {
+        if (resp.ok) {
+          activeJobId = data.job_id;
+          localStorage.setItem('hc_active_job_id', activeJobId);
+          startLogPolling(activeJobId);
+        } else {
         alert("Upload error: " + (data.error || "Failed to start upload"));
         btn.disabled = false;
         btn.textContent = 'Start Upload & Processing';
@@ -146,22 +162,63 @@
         const data = await resp.json();
         const job = data.job;
         const logs = data.logs;
-
-        // Update progress bar
+        // Update progress bar and main step text from job record
         document.getElementById('pipelineProgressBar').style.width = `${job.progress}%`;
-        document.getElementById('pipelineProgressText').textContent = `${job.progress}%`;
+        document.getElementById('pipelineProgressText').textContent = `${Math.round(job.progress)}%`;
         document.getElementById('pipelineStepText').textContent = job.current_step || 'Processing...';
 
-        // Update stage indicators based on progress %
-        if (job.progress >= 10) document.getElementById('stage-receive').innerHTML = '✓ Receiving & streaming to disk';
-        if (job.progress >= 20) document.getElementById('stage-inspect').innerHTML = '✓ Inspecting media metadata';
-        if (job.progress >= 55) document.getElementById('stage-transcode').innerHTML = '✓ Transcoded HLS variants';
-        if (job.progress >= 90) document.getElementById('stage-upload-cdn').innerHTML = '✓ Uploaded to CDN';
-        if (job.progress >= 95) document.getElementById('stage-verify').innerHTML = '✓ Verified CDN files';
-        if (job.progress >= 100) {
-          document.getElementById('stage-cleanup').innerHTML = '✓ Local server disk space reclaimed';
+        // Update button text based on status
+        const btn = document.getElementById('startUploadBtn');
+        if (job.status === 'processing') {
+          btn.textContent = job.current_step && job.progress < 100 ? `${job.current_step} — ${Math.round(job.progress)}%` : 'Processing...';
+          btn.disabled = true;
+        } else if (job.status === 'queued') {
+          btn.textContent = 'Queued — Waiting...';
+          btn.disabled = true;
+        } else if (job.status === 'completed') {
+          btn.textContent = 'Upload Complete';
+          btn.disabled = false;
+        } else if (job.status === 'failed') {
+          btn.textContent = 'Processing Failed';
+          btn.disabled = false;
+        }
+
+        // Update explicit stage indicators based on job.current_step and logs
+        const stageEls = document.querySelectorAll('#pipelineStages .stage-item');
+        stageEls.forEach(el => {
+          const target = el.getAttribute('data-stage');
+          el.setAttribute('data-state', 'pending');
+          el.textContent = `[ ] ${el.textContent.replace(/^[\[\] ✓→!]+\s*/, '')}`;
+        });
+
+        // Mark stages as completed when logs contain confirmation lines
+        const textLogs = logs.map(l => l.message).join('\n');
+        const markIf = (selector, check) => {
+          const el = document.querySelector(selector);
+          if (!el) return;
+          if (check(textLogs, job)) {
+            el.setAttribute('data-state', 'completed');
+            el.textContent = '✓ ' + el.textContent.replace(/^[\[\]\s✓→!]+/, '').trim();
+          }
+        };
+
+        markIf('#stage-receive', (logsTxt) => /Received file:/i.test(logsTxt));
+        markIf('#stage-validate', (logsTxt) => /File validated/i.test(logsTxt));
+        markIf('#stage-inspect', (logsTxt) => /Resolution detected:/i.test(logsTxt));
+        markIf('#stage-profiles', (logsTxt) => /Target profiles determined:/i.test(logsTxt));
+        markIf('#stage-transcode', (logsTxt) => /Encoding variant/i.test(logsTxt) || /Variant .* encoding complete/i.test(logsTxt));
+        markIf('#stage-hls', (logsTxt) => /Generating HLS master playlist/i.test(logsTxt));
+        markIf('#stage-upload-cdn', (logsTxt) => /CDN upload complete/i.test(logsTxt) || /Uploaded segment/i.test(logsTxt));
+        markIf('#stage-verify', (logsTxt) => /Verified master playlist/i.test(logsTxt));
+        markIf('#stage-cleanup', (logsTxt) => /Local source deleted|Local HLS files deleted|Temporary directory removed/i.test(logsTxt));
+        if (job.status === 'completed') {
+          const el = document.querySelector('#stage-complete');
+          if (el) { el.setAttribute('data-state','completed'); el.textContent = '✓ Completed'; }
           clearInterval(logPollInterval);
-          document.getElementById('startUploadBtn').textContent = 'Video Ready!';
+          localStorage.removeItem('hc_active_job_id');
+        }
+        if (job.status === 'failed') {
+          localStorage.removeItem('hc_active_job_id');
         }
 
         // Render real logs
