@@ -94,14 +94,23 @@ class HackClubCDNProvider(CDNProvider):
         # If the caller provided a full URL, try deleting that exact URL first.
         if remote_path_or_url.startswith('http'):
             try:
-                tried.append(remote_path_or_url)
                 resp = requests.delete(remote_path_or_url, headers=headers, timeout=15)
-                tried[-1] = {'endpoint': remote_path_or_url, 'status': resp.status_code, 'body': resp.text}
-                if resp.status_code in (200, 204, 404):
+                entry = {'endpoint': remote_path_or_url, 'status': resp.status_code, 'body': resp.text, 'headers': dict(resp.headers)}
+                tried.append(entry)
+                ct = resp.headers.get('content-type', '')
+                # Accept only explicit confirmations
+                if resp.status_code == 204:
                     return True, tried
-            except Exception:
-                tried[-1] = {'endpoint': remote_path_or_url, 'error': 'exception'}
-                pass
+                if resp.status_code == 200 and 'application/json' in ct:
+                    try:
+                        j = resp.json()
+                        if isinstance(j, dict) and j.get('deleted'):
+                            return True, tried
+                    except Exception:
+                        pass
+                # otherwise do not treat HTML 200/404 as success
+            except Exception as e:
+                tried.append({'endpoint': remote_path_or_url, 'error': str(e)})
 
         # Try API deletion endpoints that accept an ID/key (include documented /api/v4/upload/:id)
         delete_endpoints = [
@@ -127,20 +136,21 @@ class HackClubCDNProvider(CDNProvider):
                     pass
 
                 # Treat 200/204/404 as success (404 = already removed)
-                tried[-1] = {'endpoint': endpoint, 'status': resp.status_code, 'body': resp.text}
-                if resp.status_code in (200, 204, 404):
-                    # If provider returns JSON, prefer explicit deleted flag
+                tried[-1] = {'endpoint': endpoint, 'status': resp.status_code, 'body': resp.text, 'headers': dict(resp.headers)}
+                ct = resp.headers.get('content-type', '')
+                # Accept only explicit confirmations
+                if resp.status_code == 204:
+                    return True, tried
+                if resp.status_code == 200 and 'application/json' in ct:
                     try:
                         j = resp.json()
-                        if isinstance(j, dict) and 'deleted' in j:
-                            if j.get('deleted'):
-                                return True, tried
-                            else:
-                                # explicit false - continue to other endpoints
-                                continue
+                        if isinstance(j, dict) and j.get('deleted'):
+                            return True, tried
+                        else:
+                            continue
                     except Exception:
-                        # not JSON or parse failed — accept status codes as OK
-                        return True, tried
+                        continue
+                # do not treat 404 or HTML 200 as success
             except Exception as e:
                 try:
                     from flask import current_app
@@ -155,9 +165,17 @@ class HackClubCDNProvider(CDNProvider):
             post_endpoint = f"{self.BASE_URL}/api/v4/delete"
             tried.append(post_endpoint)
             resp = requests.post(post_endpoint, headers=headers, json={"id": file_id}, timeout=15)
-            tried[-1] = {'endpoint': post_endpoint, 'status': resp.status_code, 'body': resp.text}
-            if resp.status_code in (200, 204, 404):
+            tried[-1] = {'endpoint': post_endpoint, 'status': resp.status_code, 'body': resp.text, 'headers': dict(resp.headers)}
+            ct = resp.headers.get('content-type', '')
+            if resp.status_code == 204:
                 return True, tried
+            if resp.status_code == 200 and 'application/json' in ct:
+                try:
+                    j = resp.json()
+                    if isinstance(j, dict) and j.get('deleted'):
+                        return True, tried
+                except Exception:
+                    pass
         except Exception as e:
             tried.append({'endpoint': post_endpoint, 'error': str(e)})
             pass
@@ -167,9 +185,17 @@ class HackClubCDNProvider(CDNProvider):
             fallback = f"{self.BASE_URL}/{file_id}"
             tried.append(fallback)
             resp = requests.delete(fallback, headers=headers, timeout=15)
-            tried[-1] = {'endpoint': fallback, 'status': resp.status_code, 'body': resp.text}
-            if resp.status_code in (200, 204, 404):
+            tried[-1] = {'endpoint': fallback, 'status': resp.status_code, 'body': resp.text, 'headers': dict(resp.headers)}
+            ct = resp.headers.get('content-type', '')
+            if resp.status_code == 204:
                 return True, tried
+            if resp.status_code == 200 and 'application/json' in ct:
+                try:
+                    j = resp.json()
+                    if isinstance(j, dict) and j.get('deleted'):
+                        return True, tried
+                except Exception:
+                    pass
         except Exception as e:
             tried.append({'endpoint': fallback, 'error': str(e)})
             pass
