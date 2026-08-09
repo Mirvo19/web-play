@@ -34,7 +34,16 @@ class Config:
     MAX_CONTENT_LENGTH = 16 * 1024 * 1024 * 1024  # 16 GB max streaming payload
     HLS_SEGMENT_DURATION = int(os.environ.get('HLS_SEGMENT_DURATION', 6))
     DEFAULT_FFMPEG_THREADS = int(os.environ.get('DEFAULT_FFMPEG_THREADS', 40))
-    MAX_CONCURRENT_JOBS = int(os.environ.get('MAX_CONCURRENT_JOBS', 2))
+    MAX_CONCURRENT_JOBS = int(os.environ.get('MAX_CONCURRENT_JOBS', 1))
+
+    # Maximum upload file size enforced at application level (default 4 GB)
+    MAX_UPLOAD_SIZE_GB = float(os.environ.get('MAX_UPLOAD_SIZE_GB', 4))
+
+    # Maximum RAM budget for video processing work (FFmpeg + HLS), in MB.
+    # This is a soft guard — the app will refuse to start a new processing job
+    # if available system RAM is below this threshold.
+    PROCESSING_RAM_BUDGET_MB = int(os.environ.get('PROCESSING_RAM_BUDGET_MB', 1500))
+
     # Whether to also echo job logs and upload events to stdout (for local debugging)
     LOG_TO_STDOUT = os.environ.get('LOG_TO_STDOUT', 'false').lower() in ('1', 'true', 'yes')
 

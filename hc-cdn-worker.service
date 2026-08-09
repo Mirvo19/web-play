@@ -1,0 +1,50 @@
+[Unit]
+Description=HC CDN Player — Background Job Worker
+Documentation=https://github.com/your-org/hc-cdn-player
+After=network.target
+# Worker does not depend on the web service — it only needs DB access.
+
+[Service]
+# Run as the same user as the web service so it can access the DB and
+# the upload folder (/tmp/video-processing).
+User=hc-cdn
+Group=www-data
+
+WorkingDirectory=/opt/hc-cdn-player
+
+# Load all secrets and config from the same .env as the web service
+EnvironmentFile=/opt/hc-cdn-player/.env
+
+ExecStart=/opt/hc-cdn-player/venv/bin/python worker.py
+
+# Give FFmpeg jobs a chance to finish or exit cleanly before SIGKILL.
+# TimeoutStopSec covers the graceful shutdown window.
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=60
+
+# Restart policy — use a longer RestartSec so the DB/disk isn't hammered
+# if there's a persistent error.
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+# Resource controls — enforce the 1.5 GB processing memory budget.
+# Any child processes (FFmpeg) are counted within the same cgroup.
+# Set MemoryMax to 1.6 GB to give a small headroom above the budget.
+MemoryMax=1600M
+MemorySwapMax=0    # Prevent swapping — swap would stall FFmpeg badly on 2 GB RAM
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=false    # Worker needs /tmp/video-processing (shared with uploads)
+ProtectSystem=strict
+ReadWritePaths=/opt/hc-cdn-player /var/log/hc-cdn-player /tmp/video-processing
+
+# Ensure log directory exists
+ExecStartPre=/bin/mkdir -p /var/log/hc-cdn-player
+ExecStartPre=/bin/mkdir -p /tmp/video-processing
+
+[Install]
+WantedBy=multi-user.target

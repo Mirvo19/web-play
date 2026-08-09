@@ -14,11 +14,43 @@ from app.worker.pipeline import request_job_cancel
 
 api_bp = Blueprint('api', __name__, url_prefix='/api')
 
+
+# ---------------------------------------------------------------------------
+# Upload helpers
+# ---------------------------------------------------------------------------
+
+def _check_disk_space(upload_folder: str, incoming_bytes: int) -> tuple:
+    """
+    Return (ok: bool, free_bytes: int, error_msg: str | None).
+
+    Headroom required: incoming file + 3× (estimated HLS output overhead).
+    """
+    os.makedirs(upload_folder, exist_ok=True)
+    disk = shutil.disk_usage(upload_folder)
+    # Rough estimate: source + 3 variants × ~1.2× source each
+    required = incoming_bytes * 4 + 500 * 1024 * 1024  # extra 500 MB buffer
+    if disk.free < required:
+        return False, disk.free, (
+            f"Insufficient disk space. Need ~{round(required / 1024**3, 2)} GB, "
+            f"only {round(disk.free / 1024**3, 2)} GB free."
+        )
+    return True, disk.free, None
+
+
+def _max_upload_bytes(app) -> int:
+    return int(app.config.get('MAX_UPLOAD_SIZE_GB', 4) * 1024 ** 3)
+
+
+# ---------------------------------------------------------------------------
+# Upload endpoints
+# ---------------------------------------------------------------------------
+
 @api_bp.route('/videos/upload', methods=['POST'])
 @login_required
 def upload_video_stream():
     """
-    Stream upload endpoint with server disk space monitoring.
+    Simple multipart upload: receive file, queue job, return immediately.
+    The file is streamed directly to disk — never loaded into memory.
     """
     if 'file' not in request.files:
         return jsonify({'error': 'No video file provided'}), 400
@@ -35,19 +67,24 @@ def upload_video_stream():
     if not cdn_account or not cdn_account.enabled:
         return jsonify({'error': 'Selected CDN Account is invalid or disabled'}), 400
 
-    # 1. Disk Space Monitoring before accepting file!
-    upload_folder = current_app.config.get('UPLOAD_FOLDER', '/tmp/video-processing')
-    os.makedirs(upload_folder, exist_ok=True)
-    disk_info = shutil.disk_usage(upload_folder)
-
-    # Require at least 2 GB free disk space before processing
-    min_required_disk = 2 * 1024 * 1024 * 1024
-    if disk_info.free < min_required_disk:
+    # Check upload size limit from Content-Length header
+    max_bytes = _max_upload_bytes(current_app)
+    try:
+        cl = int(request.headers.get('Content-Length') or 0)
+    except Exception:
+        cl = 0
+    if cl > max_bytes:
         return jsonify({
-            'error': f'Server disk space critically low ({round(disk_info.free / 1024 / 1024 / 1024, 2)} GB free). Cannot process video upload.'
-        }), 507
+            'error': f"Upload exceeds maximum allowed size of "
+                     f"{current_app.config.get('MAX_UPLOAD_SIZE_GB', 4)} GB."
+        }), 413
 
-    # 2. Create Video record
+    upload_folder = current_app.config.get('UPLOAD_FOLDER', '/tmp/video-processing')
+    ok, free, err = _check_disk_space(upload_folder, max(cl, 100 * 1024 * 1024))
+    if not ok:
+        return jsonify({'error': err}), 507
+
+    # Create Video record
     filename = secure_filename(file.filename)
     video = Video(
         title=title,
@@ -59,32 +96,72 @@ def upload_video_stream():
     db.session.add(video)
     db.session.commit()
 
-    # 3. Stream file directly to temporary disk path
-    work_dir = os.path.join(upload_folder, video.id)
+    # Create Job first so we have a job_id for the work directory
+    job = Job(
+        video_id=video.id,
+        job_type='transcode_and_upload',
+        status='receiving',
+        stage='receiving_upload',
+        current_step='Receiving upload',
+        current_message='Receiving file bytes from client',
+        progress=0.0,
+        bytes_total=cl if cl > 0 else 0,
+    )
+    db.session.add(job)
+    db.session.commit()
+
+    # Work dir is job-scoped
+    work_dir = os.path.join(upload_folder, job.id)
     os.makedirs(work_dir, exist_ok=True)
     save_path = os.path.join(work_dir, filename)
 
     try:
-        file.save(save_path)
-        video.original_size = os.path.getsize(save_path)
+        # Stream in 4 MB chunks — never call file.read() for the whole body
+        chunk_size = 4 * 1024 * 1024
+        bytes_written = 0
+        start_ts = time.time()
+        last_update = 0.0
+
+        with open(save_path, 'wb', buffering=8 * 1024 * 1024) as out_f:
+            while True:
+                chunk = file.stream.read(chunk_size)
+                if not chunk:
+                    break
+                out_f.write(chunk)
+                bytes_written += len(chunk)
+
+                now_ts = time.time()
+                if cl > 0 and now_ts - last_update > 2.0:
+                    pct = min(100.0, bytes_written / cl * 100.0)
+                    db.session.refresh(job)
+                    job.bytes_received = bytes_written
+                    job.progress = pct
+                    db.session.commit()
+                    last_update = now_ts
+
+        # Upload complete — immediately transition to queued
+        file_size = os.path.getsize(save_path)
+        video.original_size = file_size
+        job.status = 'queued'
+        job.stage = 'queued'
+        job.current_step = 'Queued for processing'
+        job.current_message = 'Upload complete — awaiting background processing'
+        job.progress = 100.0
+        job.bytes_received = file_size
+        job.bytes_total = file_size
         db.session.commit()
+
     except Exception as e:
-        db.session.delete(video)
-        db.session.commit()
+        # Clean up on failure
+        try:
+            db.session.delete(job)
+            db.session.delete(video)
+            db.session.commit()
+        except Exception:
+            pass
         if os.path.exists(work_dir):
             shutil.rmtree(work_dir, ignore_errors=True)
-        return jsonify({'error': f'Failed to stream upload file to server disk: {str(e)}'}), 500
-
-    # 4. Queue transcode and upload job
-    job = Job(
-        video_id=video.id,
-        job_type='transcode_and_upload',
-        status='queued',
-        current_step='Queued',
-        current_message='Job queued for background processing'
-    )
-    db.session.add(job)
-    db.session.commit()
+        return jsonify({'error': f'Upload failed: {str(e)}'}), 500
 
     return jsonify({
         'message': 'Upload received and job queued successfully',
@@ -97,13 +174,17 @@ def upload_video_stream():
 @login_required
 def upload_video_init():
     """
-    Initialize a Video + Job and return an upload URL for streamed PUT upload.
-    This allows the client to begin uploading and show live server-side progress.
+    Initialize a Video + Job and return an upload URL for a streaming PUT upload.
+    Allows the client to show live progress before the body is fully received.
     """
     title = request.form.get('title', '').strip()
     description = request.form.get('description', '').strip()
     cdn_account_id = request.form.get('cdn_account_id', '').strip()
     filename = request.form.get('filename', '').strip()
+    try:
+        declared_size = int(request.form.get('size', 0))
+    except Exception:
+        declared_size = 0
 
     if not cdn_account_id:
         return jsonify({'error': 'CDN Account selection is required'}), 400
@@ -115,7 +196,18 @@ def upload_video_init():
     if not filename:
         return jsonify({'error': 'Filename is required'}), 400
 
-    # Create Video record (status processing while upload proceeds)
+    max_bytes = _max_upload_bytes(current_app)
+    if declared_size > max_bytes:
+        return jsonify({
+            'error': f"File exceeds maximum allowed size of "
+                     f"{current_app.config.get('MAX_UPLOAD_SIZE_GB', 4)} GB."
+        }), 413
+
+    upload_folder = current_app.config.get('UPLOAD_FOLDER', '/tmp/video-processing')
+    ok, _, err = _check_disk_space(upload_folder, max(declared_size, 100 * 1024 * 1024))
+    if not ok:
+        return jsonify({'error': err}), 507
+
     video = Video(
         title=title or filename,
         description=description,
@@ -126,24 +218,24 @@ def upload_video_init():
     db.session.add(video)
     db.session.commit()
 
-    # Create Job immediately so client can poll job state during upload
     job = Job(
         video_id=video.id,
         job_type='transcode_and_upload',
         status='receiving',
+        stage='receiving_upload',
         current_step='Receiving upload',
         current_message='Receiving file bytes from client',
-        progress=0.0
+        progress=0.0,
+        bytes_total=declared_size,
     )
     db.session.add(job)
     db.session.commit()
 
-    upload_url = f"/api/videos/{video.id}/upload"
     return jsonify({
         'message': 'Upload initialized',
         'video_id': video.id,
         'job_id': job.id,
-        'upload_url': upload_url
+        'upload_url': f"/api/videos/{video.id}/upload"
     }), 201
 
 
@@ -151,47 +243,69 @@ def upload_video_init():
 @login_required
 def upload_video_streamed(video_id):
     """
-    Receive raw streamed upload for an initialized video. Expects raw body bytes
-    (PUT) or multipart/form-data (POST). This handler writes to disk in chunks
-    and updates Job.progress based on Content-Length when available.
+    Receive a raw streamed (PUT) or multipart (POST) upload for an
+    initialized video.  Writes to disk in chunks, updating job progress.
+    Marks the job queued IMMEDIATELY when the last byte lands.
     """
     video = Video.query.get_or_404(video_id)
-    job = Job.query.filter_by(video_id=video.id, status='receiving').order_by(Job.created_at.desc()).first()
+    job = (
+        Job.query
+        .filter_by(video_id=video.id, status='receiving')
+        .order_by(Job.created_at.desc())
+        .first()
+    )
     if not job:
         return jsonify({'error': 'No active upload job found for this video'}), 400
 
     upload_folder = current_app.config.get('UPLOAD_FOLDER', '/tmp/video-processing')
-    work_dir = os.path.join(upload_folder, video.id)
+    # Store upload in the job-scoped directory
+    work_dir = os.path.join(upload_folder, job.id)
     os.makedirs(work_dir, exist_ok=True)
     filename = video.original_filename or 'source.mp4'
     save_path = os.path.join(work_dir, filename)
 
-    # Try to determine content length
     try:
-        total_bytes = int(request.headers.get('Content-Length') or 0)
+        content_length = int(request.headers.get('Content-Length') or 0)
     except Exception:
-        total_bytes = 0
+        content_length = 0
+
+    # Enforce size limit
+    max_bytes = _max_upload_bytes(current_app)
+    if content_length > max_bytes:
+        return jsonify({
+            'error': f"Upload exceeds maximum allowed size of "
+                     f"{current_app.config.get('MAX_UPLOAD_SIZE_GB', 4)} GB."
+        }), 413
+
+    # Update bytes_total from actual header if not set on init
+    if content_length > 0 and (job.bytes_total or 0) == 0:
+        job.bytes_total = content_length
+        db.session.commit()
 
     try:
-        # If this is a multipart/form-data POST coming from older clients, fall back
+        # Multipart fallback (older clients)
         if 'file' in request.files:
             f = request.files['file']
             f.save(save_path)
-            bytes_written = os.path.getsize(save_path)
-            video.original_size = bytes_written
+            file_size = os.path.getsize(save_path)
+            video.original_size = file_size
             job.status = 'queued'
+            job.stage = 'queued'
             job.current_step = 'Queued for processing'
-            job.current_message = 'Upload complete, awaiting background processing'
+            job.current_message = 'Upload complete — awaiting background processing'
             job.progress = 100.0
+            job.bytes_received = file_size
+            job.bytes_total = file_size
             db.session.commit()
-            return jsonify({'message': 'Upload saved'}), 201
+            return jsonify({'message': 'Upload saved', 'size': file_size}), 201
 
-        # Stream raw body in chunks — 4 MB chunks reduce loop overhead for large files
+        # Streaming raw body — 4 MB chunks
         chunk_size = 4 * 1024 * 1024
         bytes_written = 0
-        last_update = 0
-        last_cancel_check = 0
-        # 8 MB write buffer lets the OS batch sequential disk writes efficiently
+        last_update = 0.0
+        last_cancel_check = 0.0
+        start_ts = time.time()
+
         with open(save_path, 'wb', buffering=8 * 1024 * 1024) as out_f:
             while True:
                 chunk = request.stream.read(chunk_size)
@@ -202,50 +316,74 @@ def upload_video_streamed(video_id):
 
                 now_ts = time.time()
 
-                # Check for cancellation at most every 5 seconds to avoid DB hammering
-                if now_ts - last_cancel_check > 5:
+                # Cancellation check every 5 s (avoids DB hammering)
+                if now_ts - last_cancel_check > 5.0:
                     db.session.refresh(job)
                     last_cancel_check = now_ts
                     if job.status == 'cancelled':
-                        out_f.flush()
                         raise RuntimeError('Upload cancelled by user')
 
-                # Update Job progress at most every 2 seconds
-                if total_bytes > 0:
-                    prog = min(100.0, (bytes_written / float(max(1, total_bytes))) * 100.0 * 0.8)
-                else:
-                    # Unknown total length — use heuristics: show receiving step at 10%..80%
-                    prog = min(80.0, 5.0 + (bytes_written / (1024 * 1024)) * 0.5)
+                # Progress update every 2 s
+                if now_ts - last_update > 2.0:
+                    elapsed = now_ts - start_ts
+                    speed_bps = bytes_written / max(elapsed, 0.001)
 
-                if now_ts - last_update > 2.0 or bytes_written == total_bytes:
+                    if content_length > 0:
+                        pct = min(99.0, bytes_written / content_length * 100.0)
+                        eta = int(max(0, (content_length - bytes_written) / max(speed_bps, 1)))
+                    else:
+                        pct = min(80.0, 5.0 + bytes_written / (1024 * 1024) * 0.5)
+                        eta = None
+
+                    job.stage = 'receiving_upload'
                     job.current_step = 'Receiving upload'
-                    job.current_message = f"Receiving {bytes_written} bytes"
-                    job.progress = prog
+                    job.current_message = (
+                        f"Receiving {round(bytes_written / 1024**2, 1)} MB"
+                        + (f" / {round(content_length / 1024**2, 1)} MB" if content_length else "")
+                    )
+                    job.progress = pct
+                    job.bytes_received = bytes_written
+                    job.bytes_total = content_length
+                    if eta is not None:
+                        job.eta_seconds = eta
                     db.session.commit()
                     last_update = now_ts
 
-        video.original_size = os.path.getsize(save_path)
+        # --- Upload body fully received ---
+        file_size = os.path.getsize(save_path)
+        video.original_size = file_size
+
+        # Transition to queued IMMEDIATELY — do not leave it "receiving"
         job.status = 'queued'
+        job.stage = 'queued'
         job.current_step = 'Queued for processing'
-        job.current_message = 'Upload complete, awaiting background processing'
+        job.current_message = 'Upload complete — awaiting background processing'
         job.progress = 100.0
+        job.bytes_received = file_size
+        job.bytes_total = file_size
+        job.eta_seconds = None
         db.session.commit()
 
-        return jsonify({'message': 'Upload saved', 'size': video.original_size}), 201
-    except Exception as e:
-        return jsonify({'error': f'Failed to save upload: {str(e)}'}), 500
+        return jsonify({'message': 'Upload saved', 'size': file_size}), 201
 
+    except Exception as e:
+        return jsonify({'error': f'Upload failed: {str(e)}'}), 500
+
+
+# ---------------------------------------------------------------------------
+# Video management
+# ---------------------------------------------------------------------------
 
 @api_bp.route('/videos/<video_id>', methods=['DELETE'])
 @login_required
 def delete_video_api(video_id):
     video = Video.query.get_or_404(video_id)
 
-    # Queue background deletion job
     job = Job(
         video_id=video.id,
         job_type='delete_video',
         status='queued',
+        stage='queued',
         current_step='Queued Deletion',
         current_message='Deletion job queued and awaiting worker execution'
     )
@@ -253,13 +391,12 @@ def delete_video_api(video_id):
     db.session.add(job)
     db.session.commit()
 
-    log = JobLog(
+    db.session.add(JobLog(
         job_id=job.id,
         timestamp=datetime.now(timezone.utc),
         level='INFO',
         message='Deletion job queued and awaiting worker execution'
-    )
-    db.session.add(log)
+    ))
     db.session.commit()
 
     return jsonify({
@@ -269,11 +406,27 @@ def delete_video_api(video_id):
     }), 202
 
 
+# ---------------------------------------------------------------------------
+# Job API
+# ---------------------------------------------------------------------------
+
 @api_bp.route('/jobs/<job_id>', methods=['GET'])
 @login_required
 def get_job_api(job_id):
+    """
+    Lightweight job status endpoint — returns all progress fields.
+    This is called every ~1-2 s by the UI; keep it fast.
+    """
     job = Job.query.get_or_404(job_id)
-    return jsonify(job.to_dict(include_logs=False)), 200
+    data = job.to_dict(include_logs=False)
+
+    # Compute elapsed_seconds live if the job is actively running
+    if job.started_at and job.status == 'processing':
+        now_ts = time.time()
+        started_ts = job.started_at.timestamp()
+        data['elapsed_seconds'] = max(0, int(now_ts - started_ts))
+
+    return jsonify(data), 200
 
 
 @api_bp.route('/jobs/<job_id>/cancel', methods=['POST'])
@@ -289,13 +442,34 @@ def cancel_job_api(job_id):
     }), 200
 
 
+@api_bp.route('/jobs/<job_id>/logs', methods=['GET'])
+@login_required
+def get_job_logs(job_id):
+    job = Job.query.get_or_404(job_id)
+    since = request.args.get('since')
+
+    query = JobLog.query.filter_by(job_id=job.id)
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since)
+            query = query.filter(JobLog.timestamp > since_dt)
+        except Exception:
+            pass
+
+    logs = query.order_by(JobLog.timestamp.asc()).all()
+    return jsonify({
+        'job': job.to_dict(),
+        'logs': [l.to_dict() for l in logs]
+    })
+
+
+# ---------------------------------------------------------------------------
+# CDN Accounts
+# ---------------------------------------------------------------------------
+
 @api_bp.route('/cdn-accounts', methods=['POST'])
 @login_required
 def create_cdn_account():
-    """
-    Create a new CDN account with an encrypted API key.
-    Expects JSON: { name, provider, api_key }
-    """
     data = request.get_json() or {}
     name = (data.get('name') or '').strip()
     provider = (data.get('provider') or 'Hack Club CDN').strip()
@@ -331,33 +505,16 @@ def delete_cdn_account(account_id):
     return jsonify({'message': 'CDN Account deleted successfully'})
 
 
-@api_bp.route('/jobs/<job_id>/logs', methods=['GET'])
-@login_required
-def get_job_logs(job_id):
-    job = Job.query.get_or_404(job_id)
-    since = request.args.get('since')
-    
-    query = JobLog.query.filter_by(job_id=job.id)
-    if since:
-        try:
-            since_dt = datetime.fromisoformat(since)
-            query = query.filter(JobLog.timestamp > since_dt)
-        except Exception:
-            pass
+# ---------------------------------------------------------------------------
+# System stats
+# ---------------------------------------------------------------------------
 
-    logs = query.order_by(JobLog.timestamp.asc()).all()
-    return jsonify({
-        'job': job.to_dict(),
-        'logs': [l.to_dict() for l in logs]
-    })
-
-
-# Module-level caches and state for stats monitoring
 _cached_static_sys_info = None
 _last_net_io = None
 _last_net_time = None
 _last_temp_size = 0
 _last_temp_time = 0
+
 
 def get_static_sys_info():
     global _cached_static_sys_info
@@ -367,11 +524,10 @@ def get_static_sys_info():
     hostname = socket.gethostname() or platform.node() or "unknown"
     kernel = platform.release() or "Linux"
     arch = platform.machine() or "x86_64"
-    
     os_name = f"{platform.system()} {platform.release()}"
     if os.path.exists("/etc/os-release"):
         try:
-            with open("/etc/os-release", "r") as f:
+            with open("/etc/os-release") as f:
                 info = {}
                 for line in f:
                     if "=" in line:
@@ -385,7 +541,7 @@ def get_static_sys_info():
     cpu_model = "Unknown Processor"
     if platform.system() == "Linux" and os.path.exists("/proc/cpuinfo"):
         try:
-            with open("/proc/cpuinfo", "r") as f:
+            with open("/proc/cpuinfo") as f:
                 for line in f:
                     if "model name" in line:
                         cpu_model = line.split(":", 1)[1].strip()
@@ -395,17 +551,14 @@ def get_static_sys_info():
     if cpu_model == "Unknown Processor":
         cpu_model = platform.processor() or "x86_64 Processor"
 
-    physical_cores = psutil.cpu_count(logical=False) or 48
-    logical_threads = psutil.cpu_count(logical=True) or 92
-
     _cached_static_sys_info = {
         'hostname': hostname,
         'os': os_name,
         'kernel': kernel,
         'arch': arch,
         'cpu_model': cpu_model,
-        'physical_cores': physical_cores,
-        'logical_threads': logical_threads
+        'physical_cores': psutil.cpu_count(logical=False) or 48,
+        'logical_threads': psutil.cpu_count(logical=True) or 92,
     }
     return _cached_static_sys_info
 
@@ -416,32 +569,20 @@ def calculate_network_speeds():
     try:
         net_io = psutil.net_io_counters()
     except Exception:
-        return {
-            'download_speed_bps': 0.0,
-            'upload_speed_bps': 0.0,
-            'total_received_bytes': 0,
-            'total_sent_bytes': 0
-        }
+        return {'download_speed_bps': 0.0, 'upload_speed_bps': 0.0,
+                'total_received_bytes': 0, 'total_sent_bytes': 0}
 
-    if _last_net_io is None or _last_net_time is None:
-        download_speed = 0.0
-        upload_speed = 0.0
+    if _last_net_io is None:
+        dl, ul = 0.0, 0.0
     else:
         dt = max(now - _last_net_time, 0.001)
-        download_diff = max(0, net_io.bytes_recv - _last_net_io.bytes_recv)
-        upload_diff = max(0, net_io.bytes_sent - _last_net_io.bytes_sent)
-        download_speed = download_diff / dt
-        upload_speed = upload_diff / dt
+        dl = max(0, net_io.bytes_recv - _last_net_io.bytes_recv) / dt
+        ul = max(0, net_io.bytes_sent - _last_net_io.bytes_sent) / dt
 
     _last_net_io = net_io
     _last_net_time = now
-
-    return {
-        'download_speed_bps': round(download_speed, 2),
-        'upload_speed_bps': round(upload_speed, 2),
-        'total_received_bytes': net_io.bytes_recv,
-        'total_sent_bytes': net_io.bytes_sent
-    }
+    return {'download_speed_bps': round(dl, 2), 'upload_speed_bps': round(ul, 2),
+            'total_received_bytes': net_io.bytes_recv, 'total_sent_bytes': net_io.bytes_sent}
 
 
 def get_cpu_temperature():
@@ -451,13 +592,13 @@ def get_cpu_temperature():
             if temps:
                 for key in ('coretemp', 'k10temp', 'cpu_thermal', 'zenpower', 'acpitz'):
                     if key in temps and temps[key]:
-                        for sensor in temps[key]:
-                            if hasattr(sensor, 'current') and sensor.current is not None and sensor.current > 0:
-                                return round(sensor.current, 1)
+                        for s in temps[key]:
+                            if getattr(s, 'current', None) and s.current > 0:
+                                return round(s.current, 1)
                 for entries in temps.values():
-                    for sensor in entries:
-                        if hasattr(sensor, 'current') and sensor.current is not None and sensor.current > 0:
-                            return round(sensor.current, 1)
+                    for s in entries:
+                        if getattr(s, 'current', None) and s.current > 0:
+                            return round(s.current, 1)
     except Exception:
         pass
     return None
@@ -476,11 +617,9 @@ def get_cpu_frequency():
 def get_load_averages():
     try:
         if hasattr(os, "getloadavg"):
-            loads = os.getloadavg()
-            return [round(l, 2) for l in loads]
+            return [round(l, 2) for l in os.getloadavg()]
         elif hasattr(psutil, "getloadavg"):
-            loads = psutil.getloadavg()
-            return [round(l, 2) for l in loads]
+            return [round(l, 2) for l in psutil.getloadavg()]
     except Exception:
         pass
     return [0.0, 0.0, 0.0]
@@ -491,7 +630,6 @@ def get_cached_temp_folder_size(upload_folder):
     now = time.time()
     if now - _last_temp_time < 10:
         return _last_temp_size
-
     total = 0
     if os.path.exists(upload_folder):
         try:
@@ -503,7 +641,6 @@ def get_cached_temp_folder_size(upload_folder):
                         pass
         except Exception:
             pass
-
     _last_temp_size = total
     _last_temp_time = now
     return total
@@ -512,9 +649,8 @@ def get_cached_temp_folder_size(upload_folder):
 def get_disk_mounts():
     mounts = []
     try:
-        partitions = psutil.disk_partitions(all=False)
         seen = set()
-        for p in partitions:
+        for p in psutil.disk_partitions(all=False):
             if p.fstype in ('squashfs', 'iso9660', 'tmpfs', 'devtmpfs') or 'loop' in p.device:
                 continue
             if p.mountpoint in seen:
@@ -523,13 +659,9 @@ def get_disk_mounts():
                 usage = psutil.disk_usage(p.mountpoint)
                 seen.add(p.mountpoint)
                 mounts.append({
-                    'mount': p.mountpoint,
-                    'device': p.device,
-                    'fstype': p.fstype,
-                    'total_bytes': usage.total,
-                    'used_bytes': usage.used,
-                    'free_bytes': usage.free,
-                    'usage_percent': usage.percent
+                    'mount': p.mountpoint, 'device': p.device, 'fstype': p.fstype,
+                    'total_bytes': usage.total, 'used_bytes': usage.used,
+                    'free_bytes': usage.free, 'usage_percent': usage.percent
                 })
             except Exception:
                 pass
@@ -541,36 +673,27 @@ def get_disk_mounts():
 @api_bp.route('/system/stats', methods=['GET'])
 @login_required
 def get_system_stats():
-    """
-    Live server resource and application monitoring endpoint.
-    """
     sys_info = get_static_sys_info()
     now_ts = time.time()
-    boot_time = psutil.boot_time() if hasattr(psutil, 'boot_time') else now_ts
+    boot_time = getattr(psutil, 'boot_time', lambda: now_ts)()
     uptime_sec = max(0, int(now_ts - boot_time))
 
-    # CPU Stats
     cpu_percent = psutil.cpu_percent(interval=None)
     per_core = psutil.cpu_percent(percpu=True) or []
     cpu_temp = get_cpu_temperature()
     cpu_freq = get_cpu_frequency()
     load_avg = get_load_averages()
 
-    # RAM & Swap Stats
     ram = psutil.virtual_memory()
     swap = psutil.swap_memory()
 
-    # Disk Stats
     upload_folder = current_app.config.get('UPLOAD_FOLDER', '/tmp/video-processing')
     os.makedirs(upload_folder, exist_ok=True)
     main_disk = shutil.disk_usage(upload_folder)
     temp_folder_size = get_cached_temp_folder_size(upload_folder)
     disk_mounts = get_disk_mounts()
-
-    # Network Speeds
     net_stats = calculate_network_speeds()
 
-    # Active Job & Queue Stats
     active_jobs_count = Job.query.filter_by(status='processing').count()
     queued_jobs_count = Job.query.filter_by(status='queued').count()
     completed_jobs_count = Job.query.filter_by(status='completed').count()
@@ -578,39 +701,36 @@ def get_system_stats():
     total_jobs_count = Job.query.count()
 
     active_jobs = Job.query.filter_by(status='processing').order_by(Job.started_at.desc()).all()
-    active_job_data = None
     active_jobs_data = []
-    for active_job in active_jobs:
-        job_data = active_job.to_dict(include_logs=False)
-        if active_job.video:
-            job_data['video_title'] = active_job.video.title
-        if active_job.started_at:
-            started_ts = active_job.started_at.timestamp()
-            job_data['elapsed_seconds'] = round(max(0, now_ts - started_ts), 1)
-        active_jobs_data.append(job_data)
+    for aj in active_jobs:
+        jd = aj.to_dict(include_logs=False)
+        if aj.video:
+            jd['video_title'] = aj.video.title
+        if aj.started_at:
+            jd['elapsed_seconds'] = max(0, int(now_ts - aj.started_at.timestamp()))
+        active_jobs_data.append(jd)
 
-    if active_jobs_data:
-        active_job_data = active_jobs_data[0]
+    active_job_data = active_jobs_data[0] if active_jobs_data else None
 
-    # Settings
     ffmpeg_threads = Setting.get('ffmpeg_threads', str(current_app.config.get('DEFAULT_FFMPEG_THREADS', 40)))
     max_concurrent = Setting.get('max_concurrent_jobs', str(current_app.config.get('MAX_CONCURRENT_JOBS', 1)))
 
-    # Assets & CDN
     video_count = Video.query.count()
     variant_count = VideoVariant.query.count()
     cdn_file_count = VideoFile.query.count()
-    cdn_storage_used = sum(f.file_size or 0 for f in VideoFile.query.filter_by(upload_status='uploaded').all())
+    cdn_storage_used = sum(
+        f.file_size or 0
+        for f in VideoFile.query.filter_by(upload_status='uploaded').all()
+    )
 
     cdn_accounts = CDNAccount.query.filter_by(enabled=True).all()
     cdn_stats = [acc.to_dict(include_storage=True) for acc in cdn_accounts]
     total_avail_cdn_bytes = sum(acc['storage']['available_bytes'] for acc in cdn_stats)
 
-    # Capacity Calculator (based on standard bitrates: 1440p ~8Mbps, 1080p ~4.5Mbps, 720p ~2.5Mbps)
     capacity_calc = {
-        'hours_1440p': round(total_avail_cdn_bytes / (8 * 1000 * 1000 / 8 * 3600), 1),
-        'hours_1080p': round(total_avail_cdn_bytes / (4.5 * 1000 * 1000 / 8 * 3600), 1),
-        'hours_720p': round(total_avail_cdn_bytes / (2.5 * 1000 * 1000 / 8 * 3600), 1),
+        'hours_1440p': round(total_avail_cdn_bytes / (8_000_000 / 8 * 3600), 1),
+        'hours_1080p': round(total_avail_cdn_bytes / (4_500_000 / 8 * 3600), 1),
+        'hours_720p': round(total_avail_cdn_bytes / (2_500_000 / 8 * 3600), 1),
     }
 
     return jsonify({
@@ -650,7 +770,7 @@ def get_system_stats():
             'total_bytes': main_disk.total,
             'used_bytes': main_disk.used,
             'free_bytes': main_disk.free,
-            'usage_percent': round((main_disk.used / main_disk.total) * 100, 1) if main_disk.total else 0.0,
+            'usage_percent': round(main_disk.used / main_disk.total * 100, 1) if main_disk.total else 0.0,
             'temp_folder_size': temp_folder_size,
             'temp_storage_bytes': temp_folder_size,
             'mounts': disk_mounts
@@ -697,6 +817,10 @@ def get_system_stats():
         'capacity_calculator': capacity_calc
     })
 
+
+# ---------------------------------------------------------------------------
+# Settings
+# ---------------------------------------------------------------------------
 
 @api_bp.route('/settings', methods=['GET', 'POST'])
 @login_required

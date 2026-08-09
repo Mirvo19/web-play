@@ -5,7 +5,6 @@ from app.models import db, Setting, CDNAccount
 from app.auth import auth_bp
 from app.routes.views import views_bp
 from app.routes.api import api_bp
-from app.worker.background import start_background_worker
 import shutil
 
 def create_app(config_class=Config):
@@ -55,8 +54,10 @@ def create_app(config_class=Config):
             db.session.add(default_cdn)
             db.session.commit()
 
-        # Start persistent background worker thread
-        start_background_worker(app)
+        # NOTE: The background job worker is NOT started here.
+        # It runs as a completely separate process via worker.py, managed by
+        # hc-cdn-worker.service. This ensures that Gunicorn web workers never
+        # accidentally spawn their own processing loops.
 
         # Discover FFmpeg and FFprobe executables (use absolute paths when available)
         ffmpeg_path = os.environ.get('FFMPEG_BIN') or shutil.which('ffmpeg')

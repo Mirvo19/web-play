@@ -5,6 +5,24 @@ from app.utils.security import encrypt_api_key, decrypt_api_key, mask_api_key
 
 db = SQLAlchemy()
 
+# Valid pipeline stage names (used by pipeline.py and the UI)
+VALID_STAGES = (
+    'queued',
+    'receiving_upload',
+    'validating',
+    'inspecting_media',
+    'encoding',
+    'generating_hls',
+    'uploading_cdn',
+    'verifying_cdn',
+    'cleaning_up',
+    'completed',
+    'cancelling',
+    'cancelled',
+    'failed',
+)
+
+
 def generate_uuid():
     return str(uuid.uuid4())
 
@@ -186,11 +204,33 @@ class Job(db.Model):
     id = db.Column(db.String(36), primary_key=True, default=generate_uuid)
     video_id = db.Column(db.String(36), db.ForeignKey('videos.id'), nullable=False)
     job_type = db.Column(db.String(50), nullable=False)  # transcode_and_upload, delete_video
-    status = db.Column(db.String(50), default='queued', nullable=False)  # queued, processing, completed, failed
+    status = db.Column(db.String(50), default='queued', nullable=False)  # queued, receiving, processing, completed, failed, cancelled
     progress = db.Column(db.Float, default=0.0)  # 0.0 to 100.0
     current_step = db.Column(db.String(100), default='Queued')
     current_message = db.Column(db.Text, default='')
     error_message = db.Column(db.Text, nullable=True)
+
+    # --- Pipeline stage tracking (new) ---
+    stage = db.Column(db.String(50), default='queued', nullable=False)
+    # encoding detail
+    current_variant = db.Column(db.String(50), nullable=True)
+    variant_index = db.Column(db.Integer, default=0)
+    variant_total = db.Column(db.Integer, default=0)
+    # FFmpeg live metrics
+    speed = db.Column(db.String(20), nullable=True)        # e.g. "2.4x"
+    eta_seconds = db.Column(db.Integer, nullable=True)
+    elapsed_seconds = db.Column(db.Integer, nullable=True)
+    source_duration = db.Column(db.Float, default=0.0)    # seconds, from ffprobe
+    # Upload phase bytes
+    bytes_received = db.Column(db.BigInteger, default=0)
+    bytes_total = db.Column(db.BigInteger, default=0)
+    # CDN upload bytes
+    cdn_bytes_uploaded = db.Column(db.BigInteger, default=0)
+    cdn_bytes_total = db.Column(db.BigInteger, default=0)
+    # Cancellation flag (set by web process; polled by worker)
+    cancel_requested = db.Column(db.Boolean, default=False, nullable=False)
+
+    # Timestamps
     created_at = db.Column(db.DateTime(timezone=True), default=utc_now)
     started_at = db.Column(db.DateTime(timezone=True), nullable=True)
     completed_at = db.Column(db.DateTime(timezone=True), nullable=True)
@@ -203,13 +243,32 @@ class Job(db.Model):
             'video_id': self.video_id,
             'job_type': self.job_type,
             'status': self.status,
+            'stage': self.stage or self.status,
             'progress': round(self.progress, 1),
             'current_step': self.current_step,
             'current_message': self.current_message,
             'error_message': self.error_message,
+            # encoding detail
+            'current_variant': self.current_variant,
+            'variant_index': self.variant_index or 0,
+            'variant_total': self.variant_total or 0,
+            # FFmpeg live metrics
+            'speed': self.speed,
+            'eta_seconds': self.eta_seconds,
+            'elapsed_seconds': self.elapsed_seconds,
+            'source_duration': self.source_duration or 0.0,
+            # upload bytes
+            'bytes_received': self.bytes_received or 0,
+            'bytes_total': self.bytes_total or 0,
+            # cdn bytes
+            'cdn_bytes_uploaded': self.cdn_bytes_uploaded or 0,
+            'cdn_bytes_total': self.cdn_bytes_total or 0,
+            # timestamps
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'started_at': self.started_at.isoformat() if self.started_at else None,
-            'completed_at': self.completed_at.isoformat() if self.completed_at else None
+            'completed_at': self.completed_at.isoformat() if self.completed_at else None,
+            # derived message field for UI
+            'message': self.current_message or self.current_step or '',
         }
         if include_logs:
             data['logs'] = [log.to_dict() for log in self.logs]

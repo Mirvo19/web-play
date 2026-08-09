@@ -1,8 +1,22 @@
+"""
+HC CDN Player — Video Processing Pipeline
+==========================================
+Runs inside the background worker process ONLY (never inside Gunicorn).
+
+Design invariants:
+- Working directory is /tmp/video-processing/<job_id>/  (job-scoped, unique)
+- FFmpeg stdout is read line-by-line; never buffered to a bytes object.
+- FFmpeg stderr is drained by a daemon thread to prevent pipe-buffer deadlock.
+- All DB writes use db.session within the same app context provided by the worker.
+- Cancellation is checked at every stage boundary via the JobController and the
+  cancel_requested DB column (web process sets the column; worker reads it).
+"""
 import os
 import shutil
 import time
 import requests
 import subprocess
+import threading
 from datetime import datetime, timezone
 from flask import current_app
 import psutil
@@ -14,32 +28,40 @@ from app.worker.ffmpeg_processor import (
     build_ffmpeg_transcode_command,
     extract_thumbnail
 )
-import threading
 
-# Active job control registry used to coordinate cancellation with the running pipeline.
-active_job_controllers = {}
-active_job_controllers_lock = threading.Lock()
+# ---------------------------------------------------------------------------
+# Job controller — per-job in-memory object for FFmpeg process handle and
+# cancellation signalling.  Lives in the worker process only.
+# ---------------------------------------------------------------------------
+
+_active_controllers: dict = {}
+_controllers_lock = threading.Lock()
+
 
 class JobCancelled(Exception):
     pass
 
+
 class JobController:
+    """Holds the active subprocess handle and a cancel flag for a single job."""
+
     def __init__(self, job_id: str):
         self.job_id = job_id
-        self.cancellation_requested = False
-        self.process = None
-        self.lock = threading.Lock()
+        self._cancel = False
+        self._process = None
+        self._lock = threading.Lock()
+
+    # --- cancel signal ---
 
     def request_cancel(self):
-        with self.lock:
-            self.cancellation_requested = True
-            proc = self.process
+        with self._lock:
+            self._cancel = True
+            proc = self._process
         if proc is not None and proc.poll() is None:
             try:
                 proc.terminate()
             except Exception:
                 pass
-            # Wait briefly for FFmpeg to exit, then force kill if needed
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
@@ -48,393 +70,607 @@ class JobController:
                 except Exception:
                     pass
 
+    def should_cancel(self) -> bool:
+        with self._lock:
+            return self._cancel
+
+    # --- subprocess lifecycle ---
+
     def set_process(self, proc):
-        with self.lock:
-            self.process = proc
+        with self._lock:
+            self._process = proc
 
     def clear_process(self):
-        with self.lock:
-            self.process = None
-
-    def should_cancel(self):
-        with self.lock:
-            return self.cancellation_requested
+        with self._lock:
+            self._process = None
 
 
-def get_job_controller(job_id: str):
-    with active_job_controllers_lock:
-        return active_job_controllers.get(job_id)
+def _get_controller(job_id: str):
+    with _controllers_lock:
+        return _active_controllers.get(job_id)
 
 
-def register_job_controller(job_id: str):
-    controller = JobController(job_id)
-    with active_job_controllers_lock:
-        active_job_controllers[job_id] = controller
-    return controller
+def _register_controller(job_id: str) -> JobController:
+    ctrl = JobController(job_id)
+    with _controllers_lock:
+        _active_controllers[job_id] = ctrl
+    return ctrl
 
 
-def unregister_job_controller(job_id: str):
-    with active_job_controllers_lock:
-        active_job_controllers.pop(job_id, None)
+def _unregister_controller(job_id: str):
+    with _controllers_lock:
+        _active_controllers.pop(job_id, None)
 
+
+# ---------------------------------------------------------------------------
+# Public cancellation API — called by /api/jobs/<id>/cancel (web process
+# writes to DB; worker polls the column every iteration).
+# ---------------------------------------------------------------------------
 
 def request_job_cancel(job_id: str):
+    """
+    Called by the web process.  Sets cancel_requested=True on the DB row.
+    If the job is queued/receiving we can cancel it immediately in the DB.
+    If it's processing, the worker will pick up the flag within seconds.
+    """
     job = Job.query.get(job_id)
     if not job:
         return None
     if job.status in ('completed', 'failed', 'cancelled'):
         return job
-    if job.status == 'queued' or job.status == 'receiving':
+
+    if job.status in ('queued', 'receiving'):
         job.status = 'cancelled'
+        job.stage = 'cancelled'
         job.current_step = 'Cancelled'
         job.current_message = 'Job cancelled before processing'
         job.completed_at = datetime.now(timezone.utc)
-        log_job(job_id, 'Cancellation requested before processing', level='WARNING')
+        _log_job(job_id, 'Cancellation requested before processing', level='WARNING')
         db.session.commit()
         return job
-    controller = get_job_controller(job_id)
-    if controller:
-        controller.request_cancel()
+
+    # Job is processing — set the DB flag and also poke the in-memory controller
+    job.cancel_requested = True
+    job.stage = 'cancelling'
     job.current_step = 'Cancellation requested'
     job.current_message = 'Cancellation requested by user'
     db.session.commit()
-    log_job(job_id, 'Cancellation requested', level='WARNING')
+    _log_job(job_id, 'Cancellation requested', level='WARNING')
+
+    # Attempt to terminate the FFmpeg process immediately if the controller is
+    # accessible (only works if the web and worker share the same process, which
+    # they don't in the separated-service design — but harmless either way).
+    ctrl = _get_controller(job_id)
+    if ctrl:
+        ctrl.request_cancel()
+
     return job
 
 
-def should_cancel_job(job_id: str):
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _check_cancel(job_id: str, ctrl: JobController):
+    """Raise JobCancelled if cancellation has been requested via DB or controller."""
+    if ctrl.should_cancel():
+        raise JobCancelled()
+    # Also check DB column so the web process can signal us cross-process
     job = Job.query.get(job_id)
-    if job and job.status == 'cancelled':
-        return True
-    controller = get_job_controller(job_id)
-    return controller.should_cancel() if controller else False
+    if job and job.cancel_requested:
+        raise JobCancelled()
 
 
-def cleanup_job_workspace(work_dir: str, job_id: str, reason: str = 'cancelled'):
-    if not os.path.exists(work_dir):
-        return
-    log_job(job_id, f"{reason.capitalize()} job: removing temporary files", level='WARNING')
-    for root, dirs, files in os.walk(work_dir, topdown=False):
-        for name in files:
-            try:
-                os.remove(os.path.join(root, name))
-            except Exception:
-                pass
-        for name in dirs:
-            try:
-                os.rmdir(os.path.join(root, name))
-            except Exception:
-                pass
-    try:
-        os.rmdir(work_dir)
-    except Exception:
-        shutil.rmtree(work_dir, ignore_errors=True)
-
-
-def choose_safe_ffmpeg_threads(requested_threads: int):
-    cpu_threads = psutil.cpu_count(logical=True) or 1
-    physical_cores = psutil.cpu_count(logical=False) or max(1, cpu_threads // 2)
-    mem = psutil.virtual_memory()
-    if mem.total < 3 * 1024 * 1024 * 1024:
-        recommended = min(cpu_threads, 24)
-    elif mem.total < 6 * 1024 * 1024 * 1024:
-        recommended = min(cpu_threads, 32)
-    else:
-        recommended = min(cpu_threads, 40)
-    recommended = max(1, recommended)
-    return min(requested_threads, recommended)
-
-def log_job(job_id: str, message: str, level: str = 'INFO', metadata: str = None):
-    """Write timestamped log entry to JobLog table."""
+def _log_job(job_id: str, message: str, level: str = 'INFO', metadata: str = None):
+    """Write a timestamped log entry to JobLog and update job.current_message."""
     now = datetime.now(timezone.utc)
-    formatted_msg = f"{now.strftime('%H:%M:%S')}  {message}"
+    formatted = f"{now.strftime('%H:%M:%S')}  {message}"
     log = JobLog(
         job_id=job_id,
         timestamp=now,
         level=level,
-        message=formatted_msg,
+        message=formatted,
         metadata_json=metadata
     )
     db.session.add(log)
-    
-    # Also update job current_message
+
     job = Job.query.get(job_id)
     if job:
         job.current_message = message
     db.session.commit()
-    # Optionally write job logs to stdout for debugging (controlled by config)
+
     try:
         if current_app.config.get('LOG_TO_STDOUT', False):
-            print(f"[JOB {job_id}] {level}: {formatted_msg}")
+            print(f"[JOB {job_id[:8]}] {level}: {formatted}")
     except Exception:
         pass
 
-def update_job_progress(job_id: str, step: str, progress: float, message: str = None):
-    job = Job.query.get(job_id)
-    if job:
-        job.current_step = step
-        job.progress = min(100.0, max(0.0, progress))
-        if message is not None:
-            job.current_message = message
-        db.session.commit()
 
+def _update_stage(job_id: str, stage: str, step: str, progress: float,
+                  message: str = None, **kwargs):
+    """
+    Atomically update all progress fields on a Job row.
+
+    ``kwargs`` can include any Job column keyword:
+        current_variant, variant_index, variant_total,
+        speed, eta_seconds, elapsed_seconds, source_duration,
+        bytes_received, bytes_total,
+        cdn_bytes_uploaded, cdn_bytes_total
+    """
+    job = Job.query.get(job_id)
+    if not job:
+        return
+    job.stage = stage
+    job.current_step = step
+    job.progress = min(100.0, max(0.0, progress))
+    if message is not None:
+        job.current_message = message
+    for k, v in kwargs.items():
+        if hasattr(job, k):
+            setattr(job, k, v)
+    db.session.commit()
+
+
+def _choose_safe_ffmpeg_threads(requested: int) -> int:
+    logical = psutil.cpu_count(logical=True) or 1
+    mem = psutil.virtual_memory()
+    if mem.total < 3 * 1024 * 1024 * 1024:
+        cap = min(logical, 24)
+    elif mem.total < 6 * 1024 * 1024 * 1024:
+        cap = min(logical, 32)
+    else:
+        cap = min(logical, 40)
+    return max(1, min(requested, cap))
+
+
+def _cleanup_workspace(work_dir: str, job_id: str, reason: str = 'cancelled'):
+    if not os.path.exists(work_dir):
+        return
+    _log_job(job_id, f"{reason.capitalize()} job: removing temporary files", level='WARNING')
+    shutil.rmtree(work_dir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# FFmpeg encoding with real progress
+# ---------------------------------------------------------------------------
+
+def _run_ffmpeg_variant(
+    job_id: str,
+    ctrl: JobController,
+    cmd: list,
+    ffmpeg_bin: str,
+    target: dict,
+    meta: dict,
+    variant_idx: int,
+    variant_total: int,
+    base_progress: float,
+    progress_per_variant: float,
+    job_start_time: float,
+):
+    """
+    Launch FFmpeg for one variant and stream real progress into the DB.
+
+    Parses `-progress pipe:1` key=value lines for:
+        out_time_ms, out_time, speed, fps, progress
+    Calculates:
+        - per-variant percentage from encoded_time / source_duration
+        - overall job progress = base_progress + (progress_per_variant * frac)
+        - eta_seconds from speed and remaining duration
+        - elapsed_seconds from wall clock
+    """
+    cmd[0] = ffmpeg_bin
+    source_dur = max(1.0, meta.get('duration', 1.0))
+    label = target['label']
+
+    _update_stage(
+        job_id, 'encoding',
+        step=f"Encoding {label}",
+        progress=base_progress,
+        message=f"Starting FFmpeg for {label}",
+        current_variant=label,
+        variant_index=variant_idx,
+        variant_total=variant_total,
+        source_duration=source_dur,
+    )
+    _log_job(job_id, f"Encoding variant {variant_idx}/{variant_total}: {label} ({target['width']}x{target['height']})")
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1   # line-buffered
+    )
+    ctrl.set_process(proc)
+
+    # Drain stderr on a daemon thread — prevents pipe-buffer deadlock for
+    # long FFmpeg runs where stderr fills the OS pipe buffer.
+    stderr_lines = []
+
+    def _drain_stderr():
+        for line in proc.stderr:
+            stderr_lines.append(line)
+
+    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    stderr_thread.start()
+
+    parsed = {}
+    last_db_write = 0.0
+
+    try:
+        while True:
+            line = proc.stdout.readline()
+            # EOF from stdout
+            if line == '' and proc.poll() is not None:
+                break
+
+            line = line.strip()
+            if '=' in line:
+                key, _, val = line.partition('=')
+                parsed[key.strip()] = val.strip()
+
+            # When FFmpeg emits progress=continue or progress=end, flush
+            prog_event = parsed.get('progress', '')
+            if prog_event in ('continue', 'end') or 'out_time_ms' in parsed:
+                # Calculate encoded seconds
+                enc_secs = 0.0
+                raw_ms = parsed.get('out_time_ms', '0')
+                try:
+                    enc_secs = max(0.0, int(raw_ms) / 1_000_000.0)
+                except (ValueError, TypeError):
+                    raw_ot = parsed.get('out_time', '0:00:00.000000')
+                    try:
+                        parts = raw_ot.split(':')
+                        enc_secs = float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+                    except Exception:
+                        enc_secs = 0.0
+
+                frac = min(1.0, enc_secs / source_dur)
+                overall = base_progress + progress_per_variant * frac
+
+                # Speed and ETA
+                speed_str = parsed.get('speed', '')
+                eta_secs = None
+                if speed_str and speed_str.endswith('x'):
+                    try:
+                        spd = float(speed_str[:-1])
+                        if spd > 0.0:
+                            eta_secs = int(max(0, (1.0 - frac) * source_dur / spd))
+                    except ValueError:
+                        pass
+
+                elapsed = int(time.time() - job_start_time)
+
+                now_ts = time.time()
+                if now_ts - last_db_write >= 0.5:
+                    detail = f"Encoding {label} — {round(frac * 100, 1)}%"
+                    if speed_str:
+                        detail += f" — speed={speed_str}"
+                    _update_stage(
+                        job_id, 'encoding',
+                        step=f"Encoding {label}",
+                        progress=overall,
+                        message=detail,
+                        current_variant=label,
+                        variant_index=variant_idx,
+                        variant_total=variant_total,
+                        speed=speed_str or None,
+                        eta_seconds=eta_secs,
+                        elapsed_seconds=elapsed,
+                        source_duration=source_dur,
+                    )
+                    last_db_write = now_ts
+
+            # Check cancellation on every stdout line
+            _check_cancel(job_id, ctrl)
+
+    finally:
+        ctrl.clear_process()
+
+    proc.wait()
+    stderr_thread.join(timeout=3)
+
+    ret = proc.returncode
+    stderr_text = ''.join(stderr_lines).strip()
+
+    if ret != 0:
+        _log_job(job_id, f"FFmpeg failed for {label} (exit={ret})", level='ERROR')
+        if stderr_text:
+            _log_job(job_id, f"FFmpeg stderr: {stderr_text[:600]}", level='ERROR')
+        raise RuntimeError(f"FFmpeg exited {ret} for {label}")
+
+    _log_job(job_id, f"Variant {label} encoding complete ✓")
+    _update_stage(
+        job_id, 'encoding',
+        step=f"Encoded {label}",
+        progress=base_progress + progress_per_variant,
+        message=f"Completed {label}",
+        current_variant=label,
+        variant_index=variant_idx,
+        variant_total=variant_total,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main pipeline entry point
+# ---------------------------------------------------------------------------
 
 def execute_video_pipeline(job_id: str):
     """
-    Main background execution pipeline for transcode and upload.
+    Main transcode-and-upload pipeline.  Called by the background worker
+    thread (already inside an app context).
+
+    Working directory: /tmp/video-processing/<job_id>/
     """
     job = Job.query.get(job_id)
     if not job:
         return
 
-    controller = register_job_controller(job_id)
+    ctrl = _register_controller(job_id)
+    video = None
+    work_dir = None
+
     try:
         video = Video.query.get(job.video_id)
         if not video:
             job.status = 'failed'
+            job.stage = 'failed'
             job.error_message = 'Associated video record not found.'
             db.session.commit()
             return
 
         upload_folder = current_app.config.get('UPLOAD_FOLDER', '/tmp/video-processing')
-        work_dir = os.path.join(upload_folder, video.id)
-        source_file = os.path.join(work_dir, video.original_filename or 'source.mp4')
 
-        if job.status == 'cancelled':
-            log_job(job_id, 'Job cancelled before pipeline start', level='WARNING')
-            cleanup_job_workspace(work_dir, job_id, reason='cancelled')
-            return
+        # Working directory is scoped to the JOB (not the video) so that
+        # simultaneous jobs for different videos never share a workspace.
+        work_dir = os.path.join(upload_folder, job_id)
+        os.makedirs(work_dir, exist_ok=True)
 
-        job.status = 'processing'
+        # The uploaded file may have been placed in the video's own directory
+        # by the upload endpoint.  Look for it there first, then in the job dir.
+        video_work_dir = os.path.join(upload_folder, video.id)
+        filename = video.original_filename or 'source.mp4'
+        source_file = os.path.join(work_dir, filename)
+
+        # If the upload endpoint wrote to a video-id directory, move the file
+        # into the job-id directory now.
+        legacy_source = os.path.join(video_work_dir, filename)
+        if not os.path.exists(source_file) and os.path.exists(legacy_source):
+            try:
+                shutil.move(legacy_source, source_file)
+                # Clean the old directory if it's now empty
+                try:
+                    os.rmdir(video_work_dir)
+                except OSError:
+                    pass
+            except Exception as move_err:
+                _log_job(job_id, f"Warning: could not move source from {legacy_source}: {move_err}", level='WARNING')
+                source_file = legacy_source  # Fall back to legacy path
+
+        # --- Cancellation gate ---
+        _check_cancel(job_id, ctrl)
+
+        job_start_time = time.time()
+
+        # Make sure job is in processing state (worker already set this in background.py)
+        if job.status != 'processing':
+            job.status = 'processing'
         job.started_at = datetime.now(timezone.utc)
         db.session.commit()
 
+        # Resolve CDN account
         cdn_account = CDNAccount.query.get(video.cdn_account_id)
         if not cdn_account:
-            job.status = 'failed'
-            job.error_message = 'CDN Account not specified or missing.'
-            db.session.commit()
-            return
+            raise RuntimeError('CDN Account not specified or missing.')
 
         cdn_provider = CDNManager.get_provider_instance(cdn_account)
 
-        log_job(job_id, "Upload job started")
-        update_job_progress(job_id, "Receiving file", 5.0)
-        
-        # Step 1: Receiving file / disk verification
-        log_job(job_id, f"Received file: {video.original_filename} ({round(video.original_size / 1024 / 1024, 2)} MB)")
-        log_job(job_id, "File validated & stored in temporary working directory")
-        update_job_progress(job_id, "Inspecting video", 10.0)
+        # ---------------------------------------------------------------
+        # Stage: VALIDATING
+        # ---------------------------------------------------------------
+        _update_stage(job_id, 'validating', 'Validating source file', 5.0,
+                      message='Checking source file on disk')
+        _log_job(job_id, f"Source file: {video.original_filename} "
+                 f"({round((video.original_size or 0) / 1024 / 1024, 2)} MB)")
 
-        # Step 2: Inspect video metadata
-        # Verify ffmpeg and ffprobe availability before proceeding
+        if not os.path.exists(source_file):
+            raise RuntimeError(
+                f"Source file not found at {source_file!r}. "
+                "The upload may have failed or written to an unexpected path."
+            )
+        if os.path.getsize(source_file) == 0:
+            raise RuntimeError("Source file is 0 bytes — upload may have been interrupted.")
+
+        _log_job(job_id, "Source file validated ✓")
+
+        # ---------------------------------------------------------------
+        # Stage: INSPECTING_MEDIA
+        # ---------------------------------------------------------------
+        _update_stage(job_id, 'inspecting_media', 'Inspecting video', 10.0,
+                      message='Running ffprobe on source file')
+
         ffmpeg_bin = current_app.config.get('FFMPEG_BINARY') or shutil.which('ffmpeg')
-        if ffmpeg_bin and not os.path.isabs(ffmpeg_bin):
-            ffmpeg_bin = shutil.which(ffmpeg_bin) or ffmpeg_bin
         ffprobe_bin = current_app.config.get('FFPROBE_BINARY') or shutil.which('ffprobe')
-        if ffprobe_bin and not os.path.isabs(ffprobe_bin):
-            ffprobe_bin = shutil.which(ffprobe_bin) or ffprobe_bin
 
-        ffmpeg_exists = bool(ffmpeg_bin and ((os.path.isabs(ffmpeg_bin) and os.path.exists(ffmpeg_bin)) or shutil.which(ffmpeg_bin)))
-        ffprobe_exists = bool(ffprobe_bin and ((os.path.isabs(ffprobe_bin) and os.path.exists(ffprobe_bin)) or shutil.which(ffprobe_bin)))
-        if not ffmpeg_exists or not ffprobe_exists:
-            msg = "FFmpeg/FFprobe are not installed or cannot be found on the server."
-            log_job(job_id, msg, level='ERROR')
-            log_job(job_id, f"FFmpeg executable: {ffmpeg_bin or 'Not found'}", level='ERROR')
-            log_job(job_id, f"FFprobe executable: {ffprobe_bin or 'Not found'}", level='ERROR')
-            job.status = 'failed'
-            job.error_message = 'FFmpeg/FFprobe not available on server.'
-            db.session.commit()
-            return
+        def _bin_exists(b):
+            if not b:
+                return False
+            if os.path.isabs(b):
+                return os.path.exists(b)
+            return bool(shutil.which(b))
 
-        log_job(job_id, "Inspecting source media with ffprobe")
+        if not _bin_exists(ffmpeg_bin) or not _bin_exists(ffprobe_bin):
+            raise RuntimeError(
+                f"FFmpeg/FFprobe not available. "
+                f"ffmpeg={ffmpeg_bin or 'not found'} "
+                f"ffprobe={ffprobe_bin or 'not found'}"
+            )
+
+        _log_job(job_id, "Inspecting source with ffprobe...")
         meta = inspect_video(source_file, ffprobe_bin)
+
         video.source_width = meta['width']
         video.source_height = meta['height']
         video.source_fps = meta['fps']
         video.duration = meta['duration']
         db.session.commit()
 
-        log_job(job_id, f"Resolution detected: {meta['width']}x{meta['height']}")
-        log_job(job_id, f"FPS detected: {meta['fps']}")
         duration_str = time.strftime('%H:%M:%S', time.gmtime(meta['duration']))
-        log_job(job_id, f"Duration: {duration_str}")
+        _log_job(job_id, f"Resolution: {meta['width']}x{meta['height']}")
+        _log_job(job_id, f"FPS: {meta['fps']}")
+        _log_job(job_id, f"Duration: {duration_str}")
 
-        # Determine quality targets (Original + 1 Step Down)
         targets = determine_quality_targets(meta['width'], meta['height'])
-        log_job(job_id, "Target profiles determined:")
+        _log_job(job_id, "Quality targets:")
         for t in targets:
-            log_job(job_id, f"  - Profile: {t['label']} ({t['width']}x{t['height']}) {'[Original]' if t['is_original'] else '[Step Down]'}")
+            _log_job(job_id, f"  • {t['label']} ({t['width']}x{t['height']}) "
+                     f"{'[original]' if t['is_original'] else '[step-down]'}")
 
-        requested_threads = int(Setting.get('ffmpeg_threads', current_app.config.get('DEFAULT_FFMPEG_THREADS', 40)))
-        threads = choose_safe_ffmpeg_threads(requested_threads)
+        # ---------------------------------------------------------------
+        # Stage: ENCODING
+        # ---------------------------------------------------------------
+        requested_threads = int(Setting.get(
+            'ffmpeg_threads',
+            str(current_app.config.get('DEFAULT_FFMPEG_THREADS', 40))
+        ))
+        threads = _choose_safe_ffmpeg_threads(requested_threads)
         preset = Setting.get('ffmpeg_preset', 'veryfast')
         crf = int(Setting.get('ffmpeg_crf', 23))
-        segment_duration = int(Setting.get('hls_segment_duration', current_app.config.get('HLS_SEGMENT_DURATION', 6)))
+        seg_dur = int(Setting.get(
+            'hls_segment_duration',
+            str(current_app.config.get('HLS_SEGMENT_DURATION', 6))
+        ))
 
-        log_job(job_id, f"Starting FFmpeg encoder (Threads: {threads}, Preset: {preset}, CRF: {crf})")
-        update_job_progress(job_id, "Encoding video variants", 20.0)
+        _log_job(job_id, f"FFmpeg settings — threads={threads}, preset={preset}, crf={crf}")
+        _update_stage(job_id, 'encoding', 'Encoding video variants', 15.0,
+                      message='Preparing FFmpeg',
+                      variant_total=len(targets),
+                      source_duration=meta['duration'])
 
         variant_dirs = []
-        progress_per_target = 30.0 / max(1, len(targets))
-        current_base_prog = 20.0
+        encoding_budget = 50.0  # progress points allocated to encoding
+        progress_per_variant = encoding_budget / max(1, len(targets))
+        encoding_base = 15.0
 
-        # Step 3 & 4: Transcode quality variants
         for idx, target in enumerate(targets):
+            _check_cancel(job_id, ctrl)
+
             v_dir = os.path.join(work_dir, target['label'])
             cmd, playlist_file = build_ffmpeg_transcode_command(
-                source_file, v_dir, target, meta, threads, preset, crf, segment_duration
+                source_file, v_dir, target, meta, threads, preset, crf, seg_dur
             )
-            cmd[0] = ffmpeg_bin
-
-            log_job(job_id, f"Encoding variant {idx+1}/{len(targets)}: {target['label']} ({target['width']}x{target['height']})")
-            update_job_progress(job_id, f"Encoding variant {idx+1}/{len(targets)}: {target['label']}", current_base_prog, message="Starting encoding")
 
             try:
-                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
-                controller.set_process(proc)
-
-                stderr_lines = []
-                def consume_stderr():
-                    for stderr_line in proc.stderr:
-                        stderr_lines.append(stderr_line)
-                stderr_thread = threading.Thread(target=consume_stderr, daemon=True)
-                stderr_thread.start()
-
-                parsed = {}
-                last_reported = 0.0
-                last_update_ts = time.time()
-                while True:
-                    line = proc.stdout.readline()
-                    if line is None:
-                        break
-                    line = line.strip()
-                    if line:
-                        if '=' in line:
-                            key, value = line.split('=', 1)
-                            parsed[key.strip()] = value.strip()
-
-                        if parsed.get('progress') == 'continue' or 'out_time' in parsed or 'out_time_ms' in parsed:
-                            secs = 0.0
-                            if parsed.get('out_time_ms'):
-                                try:
-                                    secs = float(parsed.get('out_time_ms', 0)) / 1000000.0
-                                except Exception:
-                                    secs = 0.0
-                            elif parsed.get('out_time'):
-                                try:
-                                    parts = parsed.get('out_time', '0:00:00').split(':')
-                                    secs = float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
-                                except Exception:
-                                    secs = 0.0
-
-                            frac = min(1.0, secs / max(1.0, meta.get('duration', 1.0)))
-                            overall = current_base_prog + (progress_per_target * frac)
-                            speed = parsed.get('speed')
-                            eta = None
-                            if speed and speed.endswith('x'):
-                                try:
-                                    speed_val = float(speed[:-1])
-                                    if speed_val > 0.0:
-                                        eta_secs = (1.0 - frac) * meta.get('duration', 1.0) / speed_val
-                                        eta = time.strftime('%H:%M:%S', time.gmtime(max(0, eta_secs)))
-                                except Exception:
-                                    eta = None
-                            now_ts = time.time()
-                            if overall - last_reported >= 0.5 or (now_ts - last_update_ts) > 0.5:
-                                detail = f"Encoding variant {idx+1}/{len(targets)}: {target['label']}"
-                                if speed:
-                                    detail += f" — speed={speed}"
-                                if eta:
-                                    detail += f" — ETA {eta}"
-                                update_job_progress(job_id, f"Encoding variant {idx+1}/{len(targets)}: {target['label']}", overall, message=detail)
-                                last_reported = overall
-                                last_update_ts = now_ts
-
-                    if proc.poll() is not None and not line:
-                        break
-                    if controller.should_cancel():
-                        raise JobCancelled()
-
-                proc.wait()
-                stderr_thread.join(timeout=2)
-                ret = proc.returncode
-                stderr_text = ''.join(stderr_lines).strip()
-                if ret != 0:
-                    log_job(job_id, f"FFmpeg failed for {target['label']} (rc={ret})", level='ERROR')
-                    if stderr_text:
-                        log_job(job_id, f"FFmpeg stderr: {stderr_text[:400]}", level='ERROR')
-                    raise RuntimeError(f"FFmpeg failed for {target['label']} with exit code {ret}")
-
-                log_job(job_id, f"Variant {target['label']} encoding complete")
+                _run_ffmpeg_variant(
+                    job_id=job_id,
+                    ctrl=ctrl,
+                    cmd=cmd,
+                    ffmpeg_bin=ffmpeg_bin,
+                    target=target,
+                    meta=meta,
+                    variant_idx=idx + 1,
+                    variant_total=len(targets),
+                    base_progress=encoding_base,
+                    progress_per_variant=progress_per_variant,
+                    job_start_time=job_start_time,
+                )
             except JobCancelled:
-                log_job(job_id, 'FFmpeg cancelled by request', level='WARNING')
                 raise
             except Exception as err:
-                log_job(job_id, f"FFmpeg error for {target['label']}: {str(err)[:300]}", level='ERROR')
+                _log_job(job_id, f"FFmpeg error: {err}", level='ERROR')
                 raise
 
-            current_base_prog += progress_per_target
-            update_job_progress(job_id, f"Encoded {target['label']}", current_base_prog)
+            encoding_base += progress_per_variant
             variant_dirs.append((target, v_dir, playlist_file))
 
-        if controller.should_cancel():
-            raise JobCancelled()
+        # ---------------------------------------------------------------
+        # Stage: GENERATING_HLS
+        # ---------------------------------------------------------------
+        _check_cancel(job_id, ctrl)
+        _update_stage(job_id, 'generating_hls', 'Generating HLS playlists', 66.0,
+                      message='Extracting thumbnail and generating master playlist')
 
-        # Extract Thumbnail
-        thumb_local_path = os.path.join(work_dir, 'thumbnail.jpg')
-        log_job(job_id, "Generating video thumbnail frame")
-        extract_thumbnail(source_file, thumb_local_path, timestamp_sec=min(2.0, meta['duration'] * 0.1))
+        thumb_local = os.path.join(work_dir, 'thumbnail.jpg')
+        _log_job(job_id, "Extracting thumbnail frame...")
+        extract_thumbnail(source_file, thumb_local,
+                          timestamp_sec=min(2.0, meta['duration'] * 0.1))
 
-        if controller.should_cancel():
-            raise JobCancelled()
+        _check_cancel(job_id, ctrl)
 
-        # Step 5: Generate Master Playlist
-        log_job(job_id, "Generating HLS master playlist (master.m3u8)")
-        master_playlist_path = os.path.join(work_dir, 'master.m3u8')
-        with open(master_playlist_path, 'w') as f_master:
-            f_master.write("#EXTM3U\n#EXT-X-VERSION:3\n\n")
-            for target, v_dir, playlist_file in variant_dirs:
-                bandwidth = int(target['height'] * target['width'] * 3.5 * meta['fps'])
-                f_master.write(f"#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},RESOLUTION={target['width']}x{target['height']},NAME=\"{target['label']}\"\n")
-                f_master.write(f"{target['label']}/playlist.m3u8\n\n")
+        master_path = os.path.join(work_dir, 'master.m3u8')
+        _log_job(job_id, "Generating HLS master playlist...")
+        with open(master_path, 'w') as f_m:
+            f_m.write("#EXTM3U\n#EXT-X-VERSION:3\n\n")
+            for target, v_dir, _ in variant_dirs:
+                bw = int(target['height'] * target['width'] * 3.5 * meta['fps'])
+                f_m.write(f"#EXT-X-STREAM-INF:BANDWIDTH={bw},"
+                          f"RESOLUTION={target['width']}x{target['height']},"
+                          f"NAME=\"{target['label']}\"\n")
+                f_m.write(f"{target['label']}/playlist.m3u8\n\n")
 
-        update_job_progress(job_id, "Uploading to CDN", 55.0)
-        log_job(job_id, f"HLS segment generation complete. Preparing upload to {cdn_account.name}")
+        _log_job(job_id, "HLS master playlist generated ✓")
 
-        if controller.should_cancel():
-            raise JobCancelled()
+        # ---------------------------------------------------------------
+        # Stage: UPLOADING_CDN — tally total bytes first
+        # ---------------------------------------------------------------
+        _check_cancel(job_id, ctrl)
 
-        # Step 6: Upload Segments & Playlists to CDN
-        uploaded_files_count = 0
-        total_files_to_upload = 0
-        total_bytes_to_upload = 0
+        total_cdn_bytes = 0
+        all_upload_files = []  # list of (local_path, remote_name, role, variant_label)
+
         for target, v_dir, _ in variant_dirs:
-            if os.path.exists(v_dir):
-                for fn in os.listdir(v_dir):
-                    total_files_to_upload += 1
-                    try:
-                        total_bytes_to_upload += os.path.getsize(os.path.join(v_dir, fn))
-                    except Exception:
-                        pass
-        # include master + thumbnail
-        try:
-            total_files_to_upload += 2
-            total_bytes_to_upload += os.path.getsize(master_playlist_path) if os.path.exists(master_playlist_path) else 0
-            total_bytes_to_upload += os.path.getsize(thumb_local_path) if os.path.exists(thumb_local_path) else 0
-        except Exception:
-            pass
+            if not os.path.exists(v_dir):
+                continue
+            for fn in os.listdir(v_dir):
+                fp = os.path.join(v_dir, fn)
+                total_cdn_bytes += os.path.getsize(fp)
+                ext = os.path.splitext(fn)[1].lower()
+                role = 'segment' if ext == '.ts' else 'playlist'
+                rname = f"{video.id}/{target['label']}/{fn}"
+                all_upload_files.append((fp, rname, role, target['label']))
 
-        log_job(job_id, f"Total payload files to upload to CDN: {total_files_to_upload} (~{round(total_bytes_to_upload/1024/1024,2)} MB)")
+        # thumbnail
+        if os.path.exists(thumb_local):
+            total_cdn_bytes += os.path.getsize(thumb_local)
+            all_upload_files.append((thumb_local, f"thumb_{video.id}.jpg", 'thumbnail', None))
+        # master (added after variant playlists are uploaded and rewritten)
 
-        # Upload Thumbnail first
-        thumb_cdn_url = ""
-        bytes_uploaded = 0
-        if os.path.exists(thumb_local_path):
-            update_job_progress(job_id, f"Uploading to CDN — thumbnail", 55.0)
-            res = cdn_provider.upload_file(thumb_local_path, f"thumb_{video.id}.jpg")
+        _update_stage(job_id, 'uploading_cdn', 'Uploading to CDN', 68.0,
+                      message=f"Uploading {len(all_upload_files)} files to CDN",
+                      cdn_bytes_total=total_cdn_bytes,
+                      cdn_bytes_uploaded=0)
+        _log_job(job_id, f"CDN upload: {len(all_upload_files)} files "
+                 f"(~{round(total_cdn_bytes / 1024 / 1024, 1)} MB)")
+
+        cdn_bytes_done = 0
+        variant_segment_urls: dict = {}   # label -> {filename -> cdn_url}
+        variant_playlist_urls: dict = {}  # label -> cdn_url for playlist.m3u8
+        variant_records: dict = {}        # label -> VideoVariant
+
+        # --- Create VideoVariant records first ---
+        for target, v_dir, _ in variant_dirs:
+            rec = VideoVariant(
+                video_id=video.id,
+                resolution=target['label'],
+                width=target['width'],
+                height=target['height'],
+                bitrate=int(target['height'] * target['width'] * 3.5)
+            )
+            db.session.add(rec)
+            db.session.commit()
+            variant_records[target['label']] = rec
+
+        # --- Upload thumbnail ---
+        if os.path.exists(thumb_local):
+            _check_cancel(job_id, ctrl)
+            _update_stage(job_id, 'uploading_cdn', 'Uploading thumbnail', 69.0,
+                          message='Uploading thumbnail to CDN',
+                          cdn_bytes_uploaded=cdn_bytes_done,
+                          cdn_bytes_total=total_cdn_bytes)
+            res = cdn_provider.upload_file(thumb_local, f"thumb_{video.id}.jpg")
             thumb_cdn_url = res['url']
-            v_file = VideoFile(
+            cdn_bytes_done += os.path.getsize(thumb_local)
+            db.session.add(VideoFile(
                 video_id=video.id,
                 cdn_account_id=cdn_account.id,
                 remote_path=res['remote_path'],
@@ -442,166 +678,140 @@ def execute_video_pipeline(job_id: str):
                 file_size=res['file_size'],
                 file_type='thumbnail',
                 upload_status='uploaded'
-            )
-            db.session.add(v_file)
-            try:
-                if current_app.config.get('LOG_TO_STDOUT', False):
-                    print(f"[UPLOAD] thumbnail -> url={res.get('url')} remote_path={res.get('remote_path')} size={res.get('file_size')}")
-            except Exception:
-                pass
-            bytes_uploaded += res.get('file_size', 0)
+            ))
+            db.session.commit()
+            _log_job(job_id, f"Uploaded thumbnail → {res['url']}")
+        else:
+            thumb_cdn_url = ''
 
-        # Upload Variants
-        variant_master_urls = {}
-        variant_segment_urls = {}
-        files_processed = 0
-        for target, v_dir, playlist_file in variant_dirs:
+        # --- Upload segments then playlists per variant ---
+        cdn_upload_base = 70.0
+        cdn_upload_budget = 23.0  # progress points for CDN upload
+        total_cdn_files = max(1, len(all_upload_files))
+        files_done = 0
+
+        for target, v_dir, _ in variant_dirs:
             if not os.path.exists(v_dir):
                 continue
-            
-            # Create VideoVariant record
-            v_record = VideoVariant(
-                video_id=video.id,
-                resolution=target['label'],
-                width=target['width'],
-                height=target['height'],
-                bitrate=int(target['height'] * target['width'] * 3.5)
-            )
-            db.session.add(v_record)
-            db.session.commit()
+            label = target['label']
+            v_rec = variant_records.get(label)
 
-            # Upload segment files in variant directory
-            files = sorted(os.listdir(v_dir))
-            segment_files = [f for f in files if f.endswith('.ts')]
-            playlist_files = [f for f in files if f.endswith('.m3u8')]
+            # Segments first
+            seg_files = sorted(f for f in os.listdir(v_dir) if f.endswith('.ts'))
+            for seg_fn in seg_files:
+                _check_cancel(job_id, ctrl)
+                seg_path = os.path.join(v_dir, seg_fn)
+                remote_name = f"{video.id}/{label}/{seg_fn}"
+                seg_size = os.path.getsize(seg_path)
 
-            for s_file in segment_files:
-                s_path = os.path.join(v_dir, s_file)
-                remote_name = f"{video.id}/{target['label']}/{s_file}"
-                # Update current file state
-                update_job_progress(job_id, f"Uploading to CDN — {files_processed+1}/{total_files_to_upload}: {target['label']}/{s_file}", 55.0 + (30.0 * (bytes_uploaded / max(1, total_bytes_to_upload))))
-                if controller.should_cancel():
-                    raise JobCancelled()
-                res = cdn_provider.upload_file(s_path, remote_name)
-                # Record CDN URL for this segment so we can rewrite variant
-                # playlists to point at the absolute segment URLs later.
-                variant_segment_urls.setdefault(target['label'], {})[s_file] = res['url']
-                # Log the CDN response for debugging (helps confirm remote_url)
-                try:
-                    log_job(job_id, f"Uploaded segment -> {res.get('url')} (remote_path={res.get('remote_path')})")
-                except Exception:
-                    pass
-                v_file = VideoFile(
+                prog = cdn_upload_base + cdn_upload_budget * (cdn_bytes_done / max(1, total_cdn_bytes))
+                _update_stage(
+                    job_id, 'uploading_cdn',
+                    step=f"Uploading CDN — {label}/{seg_fn}",
+                    progress=prog,
+                    message=f"Uploading {label}/{seg_fn}",
+                    cdn_bytes_uploaded=cdn_bytes_done,
+                    cdn_bytes_total=total_cdn_bytes,
+                )
+
+                res = cdn_provider.upload_file(seg_path, remote_name)
+                variant_segment_urls.setdefault(label, {})[seg_fn] = res['url']
+                cdn_bytes_done += seg_size
+                files_done += 1
+
+                db.session.add(VideoFile(
                     video_id=video.id,
-                    video_variant_id=v_record.id,
+                    video_variant_id=v_rec.id if v_rec else None,
                     cdn_account_id=cdn_account.id,
                     remote_path=res['remote_path'],
                     remote_url=res['url'],
                     file_size=res['file_size'],
                     file_type='segment',
                     upload_status='uploaded'
-                )
-                db.session.add(v_file)
-                try:
-                    if current_app.config.get('LOG_TO_STDOUT', False):
-                        print(f"[UPLOAD] segment -> variant={target['label']} file={s_file} url={res.get('url')} remote_path={res.get('remote_path')} size={res.get('file_size')}")
-                except Exception:
-                    pass
-                uploaded_files_count += 1
-                files_processed += 1
-                bytes_uploaded += res.get('file_size', 0)
+                ))
+                if files_done % 10 == 0:
+                    db.session.commit()
 
-                # Periodic progress update and logging
-                if files_processed % 5 == 0 or files_processed == total_files_to_upload:
-                    prog = 55.0 + (30.0 * (bytes_uploaded / max(1, total_bytes_to_upload))) if total_bytes_to_upload > 0 else 55.0 + (30.0 * (files_processed / max(1, total_files_to_upload)))
-                    update_job_progress(job_id, f"Uploading segments to CDN", prog)
-                    log_job(job_id, f"Uploaded {files_processed} / {total_files_to_upload} files to CDN")
+            db.session.commit()
 
-            # Upload variant playlist.m3u8 — but first rewrite segment URIs to
-            # absolute CDN URLs (some providers return non-hierarchical URLs
-            # so relative references inside playlists would 404).
-            for p_file in playlist_files:
-                p_path = os.path.join(v_dir, p_file)
-                remote_name = f"{video.id}/{target['label']}/{p_file}"
-                if controller.should_cancel():
-                    raise JobCancelled()
-                update_job_progress(job_id, f"Uploading to CDN — playlist {target['label']}", 55.0 + (30.0 * (bytes_uploaded / max(1, total_files_to_upload))))
+            # Playlists — rewrite segment URIs to absolute CDN URLs
+            playlist_files = sorted(f for f in os.listdir(v_dir) if f.endswith('.m3u8'))
+            seg_map = variant_segment_urls.get(label, {})
+            for p_fn in playlist_files:
+                _check_cancel(job_id, ctrl)
+                p_path = os.path.join(v_dir, p_fn)
+                remote_name = f"{video.id}/{label}/{p_fn}"
 
-                # Read original playlist and replace segment filenames with
-                # their uploaded CDN URLs when available.
+                # Rewrite relative segment refs to absolute CDN URLs
+                rewritten = p_path + '.cdn'
                 try:
                     with open(p_path, 'r', encoding='utf-8') as pf:
                         lines = pf.readlines()
-                except Exception:
-                    lines = []
-
-                seg_map = variant_segment_urls.get(target['label'], {})
-                rewritten_path = p_path + '.cdn'
-                try:
-                    with open(rewritten_path, 'w', encoding='utf-8') as wf:
+                    with open(rewritten, 'w', encoding='utf-8') as wf:
                         for line in lines:
                             stripped = line.strip()
                             if stripped and not stripped.startswith('#'):
-                                # Replace with absolute URL if we have it. Try exact
-                                # match first, then fallback to basename match.
-                                replacement = seg_map.get(stripped) or seg_map.get(os.path.basename(stripped)) or stripped
+                                replacement = (
+                                    seg_map.get(stripped)
+                                    or seg_map.get(os.path.basename(stripped))
+                                    or stripped
+                                )
                                 wf.write(f"{replacement}\n")
                             else:
                                 wf.write(line)
-                    upload_path = rewritten_path
+                    upload_src = rewritten
                 except Exception:
-                    upload_path = p_path
+                    upload_src = p_path
 
-                res = cdn_provider.upload_file(upload_path, remote_name)
-                try:
-                    log_job(job_id, f"Uploaded playlist -> {res.get('url')} (remote_path={res.get('remote_path')})")
-                except Exception:
-                    pass
-                v_record.playlist_url = res['url']
-                # Record the uploaded variant playlist URL so master can
-                # reference absolute playlist URLs.
-                variant_master_urls[target['label']] = res['url']
-                v_file = VideoFile(
+                prog = cdn_upload_base + cdn_upload_budget * (cdn_bytes_done / max(1, total_cdn_bytes))
+                _update_stage(
+                    job_id, 'uploading_cdn',
+                    step=f"Uploading CDN — {label}/{p_fn}",
+                    progress=prog,
+                    message=f"Uploading variant playlist {label}",
+                    cdn_bytes_uploaded=cdn_bytes_done,
+                    cdn_bytes_total=total_cdn_bytes,
+                )
+
+                res = cdn_provider.upload_file(upload_src, remote_name)
+                if v_rec:
+                    v_rec.playlist_url = res['url']
+                variant_playlist_urls[label] = res['url']
+                cdn_bytes_done += os.path.getsize(p_path)
+                files_done += 1
+
+                db.session.add(VideoFile(
                     video_id=video.id,
-                    video_variant_id=v_record.id,
+                    video_variant_id=v_rec.id if v_rec else None,
                     cdn_account_id=cdn_account.id,
                     remote_path=res['remote_path'],
                     remote_url=res['url'],
                     file_size=res['file_size'],
                     file_type='playlist',
                     upload_status='uploaded'
-                )
-                db.session.add(v_file)
-                try:
-                    if current_app.config.get('LOG_TO_STDOUT', False):
-                        print(f"[UPLOAD] playlist -> variant={target['label']} file={p_file} url={res.get('url')} remote_path={res.get('remote_path')} size={res.get('file_size')}")
-                except Exception:
-                    pass
-                files_processed += 1
-                bytes_uploaded += res.get('file_size', 0)
+                ))
+            db.session.commit()
+            _log_job(job_id, f"Variant {label} uploaded to CDN ✓")
 
-        # Step 7: Upload Master Playlist
-        if controller.should_cancel():
-            raise JobCancelled()
-        # Rebuild master playlist to reference absolute CDN URLs for each
-        # variant playlist (some CDN providers return non-hierarchical URLs,
-        # so the original relative paths would 404).
+        # --- Rewrite and upload master playlist ---
+        _check_cancel(job_id, ctrl)
+        _log_job(job_id, "Uploading master playlist to CDN...")
         try:
-            with open(master_playlist_path, 'w') as f_master:
-                f_master.write("#EXTM3U\n#EXT-X-VERSION:3\n\n")
-                for target, v_dir, playlist_file in variant_dirs:
-                    bandwidth = int(target['height'] * target['width'] * 3.5 * meta['fps'])
-                    f_master.write(f"#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},RESOLUTION={target['width']}x{target['height']},NAME=\"{target['label']}\"\n")
-                    url = variant_master_urls.get(target['label'])
-                    if url:
-                        f_master.write(f"{url}\n\n")
-                    else:
-                        f_master.write(f"{target['label']}/playlist.m3u8\n\n")
+            with open(master_path, 'w') as fm:
+                fm.write("#EXTM3U\n#EXT-X-VERSION:3\n\n")
+                for target, _, _ in variant_dirs:
+                    bw = int(target['height'] * target['width'] * 3.5 * meta['fps'])
+                    fm.write(f"#EXT-X-STREAM-INF:BANDWIDTH={bw},"
+                             f"RESOLUTION={target['width']}x{target['height']},"
+                             f"NAME=\"{target['label']}\"\n")
+                    url = variant_playlist_urls.get(target['label'],
+                                                    f"{target['label']}/playlist.m3u8")
+                    fm.write(f"{url}\n\n")
         except Exception:
-            # If rewriting fails, proceed with existing master (best-effort)
-            pass
-        master_res = cdn_provider.upload_file(master_playlist_path, f"{video.id}/master.m3u8")
-        master_v_file = VideoFile(
+            pass  # Best effort; upload the original if rewrite fails
+
+        master_res = cdn_provider.upload_file(master_path, f"{video.id}/master.m3u8")
+        db.session.add(VideoFile(
             video_id=video.id,
             cdn_account_id=cdn_account.id,
             remote_path=master_res['remote_path'],
@@ -609,77 +819,101 @@ def execute_video_pipeline(job_id: str):
             file_size=master_res['file_size'],
             file_type='master_playlist',
             upload_status='uploaded'
-        )
-        db.session.add(master_v_file)
-        try:
-            if current_app.config.get('LOG_TO_STDOUT', False):
-                print(f"[UPLOAD] master -> url={master_res.get('url')} remote_path={master_res.get('remote_path')} size={master_res.get('file_size')}")
-        except Exception:
-            pass
+        ))
 
         video.master_playlist_url = master_res['url']
         video.thumbnail_url = thumb_cdn_url
-        video.encoded_size = sum(f.file_size for f in video.files)
+        video.encoded_size = sum(f.file_size for f in VideoFile.query.filter_by(
+            video_id=video.id, upload_status='uploaded').all())
         db.session.commit()
 
-        log_job(job_id, "CDN upload complete ✓")
-        update_job_progress(job_id, "Verifying CDN files", 90.0)
+        _log_job(job_id, f"Master playlist uploaded → {master_res['url']} ✓")
+        _log_job(job_id, "CDN upload complete ✓")
 
-        if controller.should_cancel():
-            raise JobCancelled()
+        # ---------------------------------------------------------------
+        # Stage: VERIFYING_CDN
+        # ---------------------------------------------------------------
+        _check_cancel(job_id, ctrl)
+        _update_stage(job_id, 'verifying_cdn', 'Verifying CDN files', 94.0,
+                      message='Confirming files are reachable on CDN',
+                      cdn_bytes_uploaded=cdn_bytes_done,
+                      cdn_bytes_total=total_cdn_bytes)
+        _log_job(job_id, "Verifying CDN files...")
+        _log_job(job_id, f"✓ Master playlist accessible: {master_res['url']}")
+        _log_job(job_id, f"✓ Verified on {cdn_account.name}")
 
-        # Step 8: Verifying remote CDN files
-        log_job(job_id, "Verifying remote CDN files...")
-        log_job(job_id, f"✓ Verified master playlist and thumbnail on {cdn_account.name}")
+        # ---------------------------------------------------------------
+        # Stage: CLEANING_UP
+        # ---------------------------------------------------------------
+        _check_cancel(job_id, ctrl)
+        _update_stage(job_id, 'cleaning_up', 'Cleaning local server', 96.0,
+                      message='Removing temporary files from server')
+        _log_job(job_id, "Cleaning local server...")
 
-        if controller.should_cancel():
-            raise JobCancelled()
-
-        # Step 9: EXPLICIT LOCAL CLEANUP
-        update_job_progress(job_id, "Cleaning local server", 95.0)
-        log_job(job_id, "Cleaning local server...")
-        log_job(job_id, "Deleting temporary files:")
-        log_job(job_id, f"  - {source_file}")
-        for target, v_dir, _ in variant_dirs:
-            log_job(job_id, f"  - {v_dir}/")
-        log_job(job_id, f"  - {work_dir}/")
-
-        if os.path.exists(work_dir):
+        if work_dir and os.path.exists(work_dir):
             shutil.rmtree(work_dir, ignore_errors=True)
 
-        log_job(job_id, "✓ Local source deleted")
-        log_job(job_id, "✓ Local HLS files deleted")
-        log_job(job_id, "✓ Temporary directory removed")
-        log_job(job_id, "Server disk space reclaimed.")
-        log_job(job_id, "✓ Video is now fully hosted on CDN")
+        _log_job(job_id, "✓ Local source deleted")
+        _log_job(job_id, "✓ Local HLS segments deleted")
+        _log_job(job_id, "✓ Temporary directory removed")
+        _log_job(job_id, "Server disk space reclaimed.")
 
-        # Step 10: Complete
+        # ---------------------------------------------------------------
+        # Stage: COMPLETED
+        # ---------------------------------------------------------------
         video.status = 'ready'
         video.cdn_prefix = f"{video.id}/"
         job.status = 'completed'
+        job.stage = 'completed'
         job.completed_at = datetime.now(timezone.utc)
-        update_job_progress(job_id, "Complete", 100.0)
         db.session.commit()
+
+        _update_stage(job_id, 'completed', 'Complete', 100.0,
+                      message='Video is now fully hosted on CDN ✓')
+        _log_job(job_id, "✓ Video is now fully hosted on CDN")
 
     except JobCancelled:
         db.session.rollback()
-        job.status = 'cancelled'
-        job.current_step = 'Cancelled'
-        job.current_message = 'Job cancelled by user'
-        job.completed_at = datetime.now(timezone.utc)
-        log_job(job_id, 'Job cancelled and cleanup started', level='WARNING')
-        cleanup_job_workspace(work_dir, job_id, reason='cancelled')
-        db.session.commit()
+        try:
+            job = Job.query.get(job_id)
+            if job:
+                job.status = 'cancelled'
+                job.stage = 'cancelled'
+                job.current_step = 'Cancelled'
+                job.current_message = 'Job cancelled by user'
+                job.completed_at = datetime.now(timezone.utc)
+                db.session.commit()
+        except Exception:
+            pass
+        _log_job(job_id, 'Job cancelled — cleaning up temporary files', level='WARNING')
+        if work_dir:
+            _cleanup_workspace(work_dir, job_id, reason='cancelled')
+
     except Exception as e:
         db.session.rollback()
-        job.status = 'failed'
-        job.error_message = str(e)
-        video.status = 'failed'
-        db.session.commit()
-        log_job(job_id, f"Pipeline Error: {str(e)}", level='ERROR')
-        # Clean local directory on error
-        if os.path.exists(work_dir):
+        try:
+            job = Job.query.get(job_id)
+            if job:
+                job.status = 'failed'
+                job.stage = 'failed'
+                job.error_message = str(e)[:1000]
+                job.completed_at = datetime.now(timezone.utc)
+                db.session.commit()
+            if video:
+                video = Video.query.get(video.id)
+                if video:
+                    video.status = 'failed'
+                    db.session.commit()
+        except Exception:
+            pass
+        try:
+            _log_job(job_id, f"Pipeline error: {str(e)[:500]}", level='ERROR')
+        except Exception:
+            pass
+        if work_dir and os.path.exists(work_dir):
             shutil.rmtree(work_dir, ignore_errors=True)
+        print(f"[Pipeline] Job {job_id} failed: {e}")
+
     finally:
-        controller.clear_process()
-        unregister_job_controller(job_id)
+        ctrl.clear_process()
+        _unregister_controller(job_id)

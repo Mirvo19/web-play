@@ -1,0 +1,46 @@
+[Unit]
+Description=HC CDN Player — Web Application (Gunicorn)
+Documentation=https://github.com/your-org/hc-cdn-player
+After=network.target
+# The worker service is independent; the web service can start without it.
+
+[Service]
+# --- Run as a dedicated non-root user ---
+# Create with: sudo useradd --system --no-create-home --shell /usr/sbin/nologin hc-cdn
+User=hc-cdn
+Group=www-data
+
+WorkingDirectory=/opt/hc-cdn-player
+
+# Load all secrets and config from the .env file
+EnvironmentFile=/opt/hc-cdn-player/.env
+
+# Create the runtime socket directory automatically (owned by hc-cdn:www-data)
+RuntimeDirectory=hc-cdn-player
+RuntimeDirectoryMode=0750
+
+# Ensure log directory exists
+ExecStartPre=/bin/mkdir -p /var/log/hc-cdn-player
+ExecStartPre=/bin/chown hc-cdn:www-data /var/log/hc-cdn-player
+
+ExecStart=/opt/hc-cdn-player/venv/bin/gunicorn \
+    --config /opt/hc-cdn-player/gunicorn.conf.py \
+    "run:app"
+
+# Graceful reload on SIGHUP (e.g.: sudo systemctl reload hc-cdn-player)
+ExecReload=/bin/kill -s HUP $MAINPID
+
+# Restart policy
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Security hardening (optional but recommended)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/hc-cdn-player /var/log/hc-cdn-player /run/hc-cdn-player
+
+[Install]
+WantedBy=multi-user.target

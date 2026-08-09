@@ -64,6 +64,8 @@ CREATE TABLE IF NOT EXISTS video_files (
 );
 
 -- 5. Jobs Queue Table
+-- NOTE: New columns added in v1.1 concurrency overhaul are listed below.
+-- Existing databases should use migrate_jobs.py to add these columns safely.
 CREATE TABLE IF NOT EXISTS jobs (
     id VARCHAR(36) PRIMARY KEY,
     video_id VARCHAR(36) NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
@@ -73,6 +75,34 @@ CREATE TABLE IF NOT EXISTS jobs (
     current_step VARCHAR(100) DEFAULT 'Queued',
     current_message TEXT DEFAULT '',
     error_message TEXT,
+
+    -- Pipeline stage (queued, receiving_upload, validating, inspecting_media,
+    -- encoding, generating_hls, uploading_cdn, verifying_cdn, cleaning_up,
+    -- completed, cancelling, cancelled, failed)
+    stage VARCHAR(50) NOT NULL DEFAULT 'queued',
+
+    -- Encoding detail
+    current_variant VARCHAR(50),
+    variant_index INTEGER DEFAULT 0,
+    variant_total INTEGER DEFAULT 0,
+
+    -- FFmpeg live metrics
+    speed VARCHAR(20),           -- e.g. "2.4x"
+    eta_seconds INTEGER,
+    elapsed_seconds INTEGER,
+    source_duration DOUBLE PRECISION DEFAULT 0.0,
+
+    -- Upload-phase byte counters
+    bytes_received BIGINT DEFAULT 0,
+    bytes_total BIGINT DEFAULT 0,
+
+    -- CDN upload byte counters
+    cdn_bytes_uploaded BIGINT DEFAULT 0,
+    cdn_bytes_total BIGINT DEFAULT 0,
+
+    -- Cancellation flag (set by web; polled by worker cross-process)
+    cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
+
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     started_at TIMESTAMP WITH TIME ZONE,
     completed_at TIMESTAMP WITH TIME ZONE
@@ -115,10 +145,8 @@ INSERT INTO settings (key, value) VALUES ('hls_segment_duration', '6') ON CONFLI
 
 -- =============================================================================
 -- ROW LEVEL SECURITY (RLS) CONFIGURATION (PostgreSQL / Supabase)
--- Enable RLS on all platform tables and enforce authenticated user access
 -- =============================================================================
 
--- Enable Row Level Security on all tables
 ALTER TABLE cdn_accounts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE videos ENABLE ROW LEVEL SECURITY;
 ALTER TABLE video_variants ENABLE ROW LEVEL SECURITY;
@@ -128,66 +156,34 @@ ALTER TABLE job_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE storage_snapshots ENABLE ROW LEVEL SECURITY;
 
--- 1. cdn_accounts RLS Policies
 DROP POLICY IF EXISTS "Authenticated users full access to cdn_accounts" ON cdn_accounts;
 CREATE POLICY "Authenticated users full access to cdn_accounts"
-    ON cdn_accounts FOR ALL
-    TO authenticated
-    USING (true)
-    WITH CHECK (true);
+    ON cdn_accounts FOR ALL TO authenticated USING (true) WITH CHECK (true);
 
--- 2. videos RLS Policies
 DROP POLICY IF EXISTS "Authenticated users full access to videos" ON videos;
 CREATE POLICY "Authenticated users full access to videos"
-    ON videos FOR ALL
-    TO authenticated
-    USING (true)
-    WITH CHECK (true);
+    ON videos FOR ALL TO authenticated USING (true) WITH CHECK (true);
 
--- 3. video_variants RLS Policies
 DROP POLICY IF EXISTS "Authenticated users full access to video_variants" ON video_variants;
 CREATE POLICY "Authenticated users full access to video_variants"
-    ON video_variants FOR ALL
-    TO authenticated
-    USING (true)
-    WITH CHECK (true);
+    ON video_variants FOR ALL TO authenticated USING (true) WITH CHECK (true);
 
--- 4. video_files RLS Policies
 DROP POLICY IF EXISTS "Authenticated users full access to video_files" ON video_files;
 CREATE POLICY "Authenticated users full access to video_files"
-    ON video_files FOR ALL
-    TO authenticated
-    USING (true)
-    WITH CHECK (true);
+    ON video_files FOR ALL TO authenticated USING (true) WITH CHECK (true);
 
--- 5. jobs RLS Policies
 DROP POLICY IF EXISTS "Authenticated users full access to jobs" ON jobs;
 CREATE POLICY "Authenticated users full access to jobs"
-    ON jobs FOR ALL
-    TO authenticated
-    USING (true)
-    WITH CHECK (true);
+    ON jobs FOR ALL TO authenticated USING (true) WITH CHECK (true);
 
--- 6. job_logs RLS Policies
 DROP POLICY IF EXISTS "Authenticated users full access to job_logs" ON job_logs;
 CREATE POLICY "Authenticated users full access to job_logs"
-    ON job_logs FOR ALL
-    TO authenticated
-    USING (true)
-    WITH CHECK (true);
+    ON job_logs FOR ALL TO authenticated USING (true) WITH CHECK (true);
 
--- 7. settings RLS Policies
 DROP POLICY IF EXISTS "Authenticated users full access to settings" ON settings;
 CREATE POLICY "Authenticated users full access to settings"
-    ON settings FOR ALL
-    TO authenticated
-    USING (true)
-    WITH CHECK (true);
+    ON settings FOR ALL TO authenticated USING (true) WITH CHECK (true);
 
--- 8. storage_snapshots RLS Policies
 DROP POLICY IF EXISTS "Authenticated users full access to storage_snapshots" ON storage_snapshots;
 CREATE POLICY "Authenticated users full access to storage_snapshots"
-    ON storage_snapshots FOR ALL
-    TO authenticated
-    USING (true)
-    WITH CHECK (true);
+    ON storage_snapshots FOR ALL TO authenticated USING (true) WITH CHECK (true);
