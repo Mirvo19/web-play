@@ -242,10 +242,19 @@ def delete_video_api(video_id):
         job_type='delete_video',
         status='queued',
         current_step='Queued Deletion',
-        current_message='Deletion job queued'
+        current_message='Deletion job queued and awaiting worker execution'
     )
     video.status = 'delete_pending'
     db.session.add(job)
+    db.session.commit()
+
+    log = JobLog(
+        job_id=job.id,
+        timestamp=datetime.now(timezone.utc),
+        level='INFO',
+        message='Deletion job queued and awaiting worker execution'
+    )
+    db.session.add(log)
     db.session.commit()
 
     return jsonify({

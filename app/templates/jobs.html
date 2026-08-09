@@ -40,7 +40,10 @@
               <div class="progress-bar-fill" style="width: {{ job.progress }}%;"></div>
             </div>
           </td>
-          <td style="font-size: 0.85rem; color: var(--color-muted);">{{ job.current_step }}</td>
+          <td style="font-size: 0.85rem; color: var(--color-muted);">
+            <div>{{ job.current_step }}</div>
+            <div style="font-size: 0.78rem; margin-top: 0.25rem; color: var(--color-text);">{{ job.current_message }}</div>
+          </td>
           <td>
             {% if job.status == 'completed' %}
               <span class="badge badge-success">Completed</span>

@@ -13,7 +13,9 @@ def index():
 @login_required
 def dashboard():
     videos = Video.query.order_by(Video.created_at.desc()).all()
-    active_jobs = Job.query.filter_by(status='processing').count()
+    active_job_query = Job.query.filter(Job.status.in_(['queued', 'processing']))
+    active_job_count = active_job_query.count()
+    active_job_list = active_job_query.order_by(Job.created_at.desc()).limit(5).all()
     cdn_accounts = CDNAccount.query.filter_by(enabled=True).all()
     
     total_cdn_bytes = sum(acc.get_latest_storage()['total_bytes'] for acc in cdn_accounts) or (50 * 1024 * 1024 * 1024)
@@ -23,7 +25,9 @@ def dashboard():
     return render_template(
         'dashboard.html',
         videos=videos,
-        active_jobs=active_jobs,
+        active_jobs=active_job_count,
+        active_job_count=active_job_count,
+        active_job_list=active_job_list,
         cdn_accounts=cdn_accounts,
         total_cdn_bytes=total_cdn_bytes,
         used_cdn_bytes=used_cdn_bytes,
