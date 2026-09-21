@@ -8,3 +8,5 @@ uploads/
 tmp/
 *.db
 master.md
+cdn-accounts-backup.json
+keys.txt
