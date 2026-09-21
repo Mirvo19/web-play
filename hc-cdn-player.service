@@ -1,8 +1,10 @@
 [Unit]
-Description=HC CDN Player — Web Application (Gunicorn)
+Description=HC CDN Player — Unified Web + Job Supervisor (Gunicorn)
 Documentation=https://github.com/your-org/hc-cdn-player
 After=network.target
-# The worker service is independent; the web service can start without it.
+# Single-process model: this ONE unit serves HTTP AND runs background jobs
+# (transcode, CDN upload, cleanup) on in-process executor threads.
+# hc-cdn-worker.service no longer exists — disable and remove it (see MIGRATION.md).
 
 [Service]
 # --- Run as a dedicated non-root user ---
@@ -22,10 +24,20 @@ RuntimeDirectoryMode=0750
 # Ensure log directory exists
 ExecStartPre=/bin/mkdir -p /var/log/hc-cdn-player
 ExecStartPre=/bin/chown hc-cdn:www-data /var/log/hc-cdn-player
+ExecStartPre=/bin/mkdir -p /tmp/video-processing
 
 ExecStart=/opt/hc-cdn-player/venv/bin/gunicorn \
     --config /opt/hc-cdn-player/gunicorn.conf.py \
     "run:app"
+
+# Mark the unit ready only once the app answers its readiness probe.
+ExecStartPost=/bin/sh -c 'for i in $(seq 1 30); do curl -sf --unix-socket /run/hc-cdn-player/gunicorn.sock http://localhost/ready && exit 0; sleep 2; done; exit 1'
+
+# Graceful shutdown: SIGTERM stops job polling, terminates in-flight
+# ffmpeg, awaits executor threads (up to TimeoutStopSec), then exits.
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=90
 
 # Graceful reload on SIGHUP (e.g.: sudo systemctl reload hc-cdn-player)
 ExecReload=/bin/kill -s HUP $MAINPID
@@ -36,11 +48,15 @@ RestartSec=5
 StartLimitIntervalSec=60
 StartLimitBurst=5
 
+# Resource controls — web + ffmpeg share one cgroup now. Size for your box:
+# ~120 MB web worker + up to ~1.5 GB ffmpeg during encodes.
+MemoryMax=1800M
+
 # Security hardening (optional but recommended)
 NoNewPrivileges=true
-PrivateTmp=true
+PrivateTmp=false
 ProtectSystem=strict
-ReadWritePaths=/opt/hc-cdn-player /var/log/hc-cdn-player /run/hc-cdn-player
+ReadWritePaths=/opt/hc-cdn-player /var/log/hc-cdn-player /run/hc-cdn-player /tmp/video-processing
 
 [Install]
 WantedBy=multi-user.target
