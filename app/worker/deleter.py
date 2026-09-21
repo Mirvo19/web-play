@@ -58,6 +58,7 @@ def execute_video_deletion(job_id: str):
     deleted_count = 0
     failed_count = 0
     auth_rejected = False
+    not_owned = False
 
     for idx, f in enumerate(files):
         # Honour user cancellation between files. If the job row itself is
@@ -124,6 +125,8 @@ def execute_video_deletion(job_id: str):
                             level='ERROR',
                         )
                         break
+                    if _attempts_show_not_owned(attempts):
+                        not_owned = True
             except Exception as e:
                 failed_count += 1
                 log_delete_job(job_id, f"Failed to delete remote file {identifier}: {str(e)}", level='WARNING')
@@ -146,6 +149,14 @@ def execute_video_deletion(job_id: str):
                 f"CDN API rejected the account key (401 invalid_auth); "
                 f"{deleted_count}/{total_files} files deleted. Update the CDN "
                 f"account key and retry the deletion."
+            )
+        elif not_owned:
+            job.error_message = (
+                f"CDN reports {failed_count}/{total_files} files are not owned "
+                f"by the current API key (or already deleted); "
+                f"{deleted_count}/{total_files} deleted. Files uploaded under "
+                f"a different/old key must be removed from the Hack Club CDN "
+                f"dashboard, or re-add the original key and retry."
             )
         else:
             job.error_message = (
@@ -177,6 +188,23 @@ def execute_video_deletion(job_id: str):
     db.session.commit()
 
     log_delete_job(job_id, "Video completely deleted.")
+
+
+def _attempts_show_not_owned(attempts) -> bool:
+    """True when the documented delete endpoint answered 404.
+
+    Per openapi.json that means "no matching resource belongs to the API
+    key's owner" (or the file is already gone) — an ownership fact, not a
+    wrong URL worth retrying elsewhere.
+    """
+    if not attempts:
+        return False
+    for a in attempts:
+        if not isinstance(a, dict):
+            continue
+        if a.get("status") == 404 and "/api/v4/upload/" in str(a.get("endpoint") or ""):
+            return True
+    return False
 
 
 def _attempts_show_auth_rejection(attempts) -> bool:

@@ -266,6 +266,31 @@ class DeleterHonestyTests(unittest.TestCase):
             # Video stays retryable, NOT marked deleted:
             self.assertEqual(db.session.get(Video, vid).status, "delete_pending")
 
+    def test_not_owned_404_fails_with_ownership_hint(self):
+        from app.worker import deleter
+        from app.cdn.manager import CDNManager
+        from app.models import Video, Job, db
+
+        vid, jid = self._setup_delete_job()
+
+        class ForeignKeyProvider:
+            def delete_file(self, ident):
+                return False, [{"endpoint": "https://cdn.hackclub.com/api/v4/upload/x",
+                                "status": 404, "body": "no matching resource"}]
+
+        orig = CDNManager.get_provider_instance
+        CDNManager.get_provider_instance = classmethod(lambda cls, acc: ForeignKeyProvider())
+        try:
+            with self.app.app_context():
+                deleter.execute_video_deletion(jid)
+        finally:
+            CDNManager.get_provider_instance = orig
+        with self.app.app_context():
+            job = db.session.get(Job, jid)
+            self.assertEqual(job.status, "failed")
+            self.assertIn("different", job.error_message)
+            self.assertEqual(db.session.get(Video, vid).status, "delete_pending")
+
     def test_rekey_account_repairs_decryption(self):
         with self.app.app_context():
             from app.models import CDNAccount, db
