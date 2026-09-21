@@ -1,18 +1,19 @@
 {% extends "base.html" %}
 
 {% block title %}Settings — HC CDN Player{% endblock %}
-{% block header_title %}Settings{% endblock %}
-{% block header_sub %}transcode + queue controls{% endblock %}
+{% block header_title %}Transcode settings{% endblock %}
+{% block header_sub %}applied to every new job · invalid values rejected with per-field errors{% endblock %}
 
 {% block content %}
 <div class="grid grid-2">
-  <div class="panel">
-    <div class="panel-head"><h2>FFmpeg &amp; queue</h2></div>
+  <div class="panel" data-enter>
+    <div class="panel-head"><h2><svg class="ic" aria-hidden="true"><use href="#i-sliders"/></svg>FFmpeg and queue</h2></div>
     <div class="panel-body">
       <form id="settingsForm">
         <div class="field">
           <label for="ffmpegThreads">FFmpeg CPU threads (1–128)</label>
           <input type="number" id="ffmpegThreads" min="1" max="128" value="{{ settings.ffmpeg_threads }}" required>
+          <div class="help">Capped at encode time by CPU count and free RAM.</div>
         </div>
         <div class="field">
           <label for="maxConcurrency">Max concurrent jobs (1–8)</label>
@@ -26,30 +27,33 @@
             <option value="{{ p }}" {% if settings.ffmpeg_preset == p %}selected{% endif %}>{{ p }}</option>
             {% endfor %}
           </select>
+          <div class="help">Slower presets compress better but encode slower. Only these values reach ffmpeg.</div>
         </div>
         <div class="field">
-          <label for="ffmpegCrf">CRF (0–51, lower = better quality)</label>
+          <label for="ffmpegCrf">CRF (0–51, lower is better quality)</label>
           <input type="number" id="ffmpegCrf" min="0" max="51" value="{{ settings.ffmpeg_crf }}" required>
           <div class="help">23 is the H.264 default.</div>
         </div>
         <div class="field">
           <label for="hlsSegmentDuration">HLS segment seconds (2–15)</label>
           <input type="number" id="hlsSegmentDuration" min="2" max="15" value="{{ settings.hls_segment_duration }}" required>
+          <div class="help">Shorter segments seek faster; longer ones compress better.</div>
         </div>
         <div class="alert bad" id="settingsError" style="display: none;"></div>
-        <button type="submit" class="btn primary" style="width: 100%;">Save settings</button>
+        <button type="submit" class="btn primary" style="width: 100%; justify-content: center;"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg>Save settings</button>
       </form>
     </div>
   </div>
-  <div class="panel">
-    <div class="panel-head"><h2>Notes</h2></div>
+  <div class="panel" data-enter>
+    <div class="panel-head"><h2>Field guide</h2></div>
     <div class="panel-body">
       <dl class="kv">
-        <dt>Threads</dt><dd>capped by CPU/RAM at encode time</dd>
-        <dt>Timeout</dt><dd>FFMPEG_VARIANT_TIMEOUT_SEC (default 2h)</dd>
-        <dt>Poll</dt><dd>JOB_POLL_INTERVAL (default 2s)</dd>
+        <dt>threads</dt><dd>capped by CPU/RAM at encode time</dd>
+        <dt>concurrency</dt><dd>in-process executor slots</dd>
+        <dt>timeout</dt><dd>FFMPEG_VARIANT_TIMEOUT_SEC (env)</dd>
+        <dt>poll</dt><dd>JOB_POLL_INTERVAL (env)</dd>
       </dl>
-      <p style="color: var(--muted); font-size: 12px;">Invalid values are rejected with a 400 and a per-field message — the server never applies a half-valid update.</p>
+      <p style="color: var(--muted); font-size: 12px; margin-bottom: 0;">The server never applies a half-valid update: any out-of-range field returns 400 and nothing is saved.</p>
     </div>
   </div>
 </div>
@@ -84,14 +88,14 @@
       } else if (out.data.fields) {
         var msgs = Object.keys(out.data.fields).map(function (k) { return k + ': ' + out.data.fields[k]; });
         errBox.textContent = msgs.join(' ');
-        errBox.style.display = 'block';
+        errBox.style.display = 'flex';
       } else {
         errBox.textContent = out.data.error || 'Could not save settings.';
-        errBox.style.display = 'block';
+        errBox.style.display = 'flex';
       }
     }).catch(function () {
       errBox.textContent = 'Network error saving settings.';
-      errBox.style.display = 'block';
+      errBox.style.display = 'flex';
     });
   });
 })();

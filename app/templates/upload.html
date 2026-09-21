@@ -1,19 +1,23 @@
 {% extends "base.html" %}
 
 {% block title %}Upload — HC CDN Player{% endblock %}
-{% block header_title %}Upload{% endblock %}
-{% block header_sub %}stream to server → transcode → CDN{% endblock %}
+{% block header_title %}New upload{% endblock %}
+{% block header_sub %}stream to server · transcode · CDN{% endblock %}
 
 {% block content %}
 <div class="grid grid-2">
-  <div class="panel">
-    <div class="panel-head"><h2>Source file</h2></div>
+  <div class="panel" data-enter>
+    <div class="panel-head"><h2><svg class="ic" aria-hidden="true"><use href="#i-upload"/></svg>Source file</h2></div>
     <div class="panel-body">
       <form id="uploadForm">
         <div class="field">
-          <label for="videoFile">Video file (mp4, mkv, mov, avi)</label>
+          <label for="videoFile">Video file</label>
+          <div class="dropzone" id="dropzone" role="button" tabindex="0" aria-label="Choose a video file">
+            <svg class="ic-lg" aria-hidden="true"><use href="#i-upload"/></svg>
+            <div style="font-weight: 600; margin-top: 6px;" id="dropLabel">Drop a video here or click to browse</div>
+            <div class="help">mp4 · mkv · mov · avi — streamed to server disk in chunks. Per-file CDN limit: 100 MB per segment (HLS chunks split automatically).</div>
+          </div>
           <input type="file" id="videoFile" accept="video/*" required>
-          <div class="help">Streamed to server disk in chunks. Per-file CDN limit: 100 MB per segment (HLS chunks are split automatically).</div>
         </div>
         <div class="field">
           <label for="title">Title</label>
@@ -36,26 +40,34 @@
           </select>
         </div>
         <div class="btn-row">
-          <button type="submit" id="startUploadBtn" class="btn primary" style="flex:1;" {% if not cdn_accounts %}disabled{% endif %}>Start upload</button>
-          <button type="button" id="cancelUploadBtn" class="btn danger" style="flex:1;" disabled>Cancel job</button>
+          <button type="submit" id="startUploadBtn" class="btn primary" style="flex:1; justify-content: center;" {% if not cdn_accounts %}disabled{% endif %}><svg class="ic" aria-hidden="true"><use href="#i-upload"/></svg><span>Start upload</span></button>
+          <button type="button" id="cancelUploadBtn" class="btn danger" style="flex:1; justify-content: center;" disabled>Cancel job</button>
         </div>
       </form>
     </div>
   </div>
 
-  <div class="panel">
-    <div class="panel-head"><h2>Progress</h2><span class="pill dim" id="jobStatePill">idle</span></div>
+  <div class="panel" data-enter>
+    <div class="panel-head"><h2>Pipeline</h2><span class="pill dim" id="jobStatePill">idle</span></div>
     <div class="panel-body">
-      <div class="field">
-        <label>1 · Upload to server <span class="num" id="uploadDetail">—</span></label>
-        <div class="bar"><div id="uploadBar"></div></div>
+      <div class="step" id="step1">
+        <span class="n">1</span>
+        <div style="flex:1;">
+          <div class="t">Upload to server</div>
+          <div class="d" id="uploadDetail">waiting for file…</div>
+          <div class="bar" style="margin-top: 6px;"><div id="uploadBar"></div></div>
+        </div>
       </div>
-      <div class="field">
-        <label>2 · Transcode + CDN <span class="num" id="procDetail">waiting for upload…</span></label>
-        <div class="bar"><div id="procBar"></div></div>
-        <div class="help" id="procStep">—</div>
+      <div class="step" id="step2">
+        <span class="n">2</span>
+        <div style="flex:1;">
+          <div class="t">Transcode + CDN</div>
+          <div class="d" id="procDetail">waiting for upload…</div>
+          <div class="bar" style="margin-top: 6px;"><div id="procBar"></div></div>
+          <div class="d" id="procStep" style="margin-top: 4px;">—</div>
+        </div>
       </div>
-      <div class="field">
+      <div class="field" style="margin-top: 12px; margin-bottom: 0;">
         <label>Job log</label>
         <div id="logConsole" class="logbox">Ready. Select a file and start the upload.</div>
       </div>
@@ -81,10 +93,25 @@
   var procStep = document.getElementById('procStep');
   var pill = document.getElementById('jobStatePill');
   var logBox = document.getElementById('logConsole');
+  var fileInput = document.getElementById('videoFile');
+  var dropzone = document.getElementById('dropzone');
+  var dropLabel = document.getElementById('dropLabel');
+  var step1 = document.getElementById('step1');
+  var step2 = document.getElementById('step2');
 
   function setPill(text, cls) {
     pill.textContent = text;
     pill.className = 'pill ' + (cls || 'dim');
+  }
+
+  function setStep(node, state) {
+    node.classList.remove('active', 'done');
+    if (state) node.classList.add(state);
+    var badge = node.querySelector('.n');
+    if (!badge) return;
+    badge.textContent = '';
+    if (state === 'done') badge.appendChild(HC.svgIcon('i-check'));
+    else badge.textContent = (node === step1 ? '1' : '2');
   }
 
   function appendLogs(lines) {
@@ -92,7 +119,33 @@
     logBox.scrollTop = logBox.scrollHeight;
   }
 
-  // Resume polling a job left running (e.g. after page reload).
+  /* Dropzone behavior: click opens picker, drop assigns files. */
+  dropzone.addEventListener('click', function () { fileInput.click(); });
+  dropzone.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); }
+  });
+  ['dragenter', 'dragover'].forEach(function (ev) {
+    dropzone.addEventListener(ev, function (e) { e.preventDefault(); dropzone.classList.add('over'); });
+  });
+  ['dragleave', 'drop'].forEach(function (ev) {
+    dropzone.addEventListener(ev, function (e) { e.preventDefault(); dropzone.classList.remove('over'); });
+  });
+  dropzone.addEventListener('drop', function (e) {
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+      fileInput.files = e.dataTransfer.files;
+      showFileName();
+    }
+  });
+  fileInput.addEventListener('change', showFileName);
+  function showFileName() {
+    if (fileInput.files.length) {
+      dropLabel.textContent = fileInput.files[0].name + ' (' + HC.formatBytes(fileInput.files[0].size) + ')';
+      var title = document.getElementById('title');
+      if (!title.value) title.value = fileInput.files[0].name.replace(/\.[^.]+$/, '');
+    }
+  }
+
+  /* Resume polling a job left running (e.g. after page reload). */
   var stored = null;
   try { stored = localStorage.getItem('hc_active_job_id'); } catch (e) { stored = null; }
   if (stored) {
@@ -103,7 +156,6 @@
 
   document.getElementById('uploadForm').addEventListener('submit', function (e) {
     e.preventDefault();
-    var fileInput = document.getElementById('videoFile');
     if (!fileInput.files.length) return;
     var file = fileInput.files[0];
     var title = document.getElementById('title').value.trim() || file.name;
@@ -111,8 +163,9 @@
     var cdnAccountId = document.getElementById('cdnSelect').value;
 
     startBtn.disabled = true;
-    startBtn.textContent = 'Uploading… 0%';
+    startBtn.querySelector('span').textContent = 'Uploading… 0%';
     cancelBtn.disabled = false;
+    setStep(step1, 'active');
 
     var initForm = new FormData();
     initForm.append('title', title);
@@ -127,8 +180,9 @@
         if (!out.resp.ok) {
           HC.toast('error', 'Upload init failed', out.data.error || 'Could not initialize upload.');
           startBtn.disabled = false;
-          startBtn.textContent = 'Start upload';
+          startBtn.querySelector('span').textContent = 'Start upload';
           cancelBtn.disabled = true;
+          setStep(step1, null);
           return;
         }
         activeJobId = out.data.job_id;
@@ -139,7 +193,7 @@
       .catch(function () {
         HC.toast('error', 'Upload failed', 'Network error initializing upload.');
         startBtn.disabled = false;
-        startBtn.textContent = 'Start upload';
+        startBtn.querySelector('span').textContent = 'Start upload';
         cancelBtn.disabled = true;
       });
   });
@@ -152,7 +206,7 @@
         var pct = Math.round((ev.loaded / ev.total) * 100);
         uploadBar.style.width = pct + '%';
         uploadDetail.textContent = (ev.loaded / 1048576).toFixed(0) + ' / ' + (ev.total / 1048576).toFixed(0) + ' MB';
-        startBtn.textContent = 'Uploading… ' + pct + '%';
+        startBtn.querySelector('span').textContent = 'Uploading… ' + pct + '%';
       } else {
         uploadDetail.textContent = 'sending…';
       }
@@ -161,7 +215,9 @@
       if (xhr.status >= 200 && xhr.status < 300) {
         uploadBar.style.width = '100%';
         uploadDetail.textContent = 'complete';
-        startBtn.textContent = 'Upload complete — queued';
+        setStep(step1, 'done');
+        setStep(step2, 'active');
+        startBtn.querySelector('span').textContent = 'Upload complete — queued';
       } else {
         HC.toast('error', 'Upload failed', xhr.responseText || 'Upload error.');
         resetForm('Start upload');
@@ -176,8 +232,10 @@
 
   function resetForm(label) {
     startBtn.disabled = false;
-    startBtn.textContent = label;
+    startBtn.querySelector('span').textContent = label;
     cancelBtn.disabled = true;
+    setStep(step1, null);
+    setStep(step2, null);
     try { localStorage.removeItem('hc_active_job_id'); } catch (e) { /* ignore */ }
     activeJobId = null;
   }
@@ -219,18 +277,24 @@
         procDetail.textContent = 'waiting for upload…';
       } else if (job.status === 'queued') {
         setPill('queued', 'info');
+        setStep(step1, 'done');
+        setStep(step2, 'active');
         procBar.style.width = '5%';
         procDetail.textContent = 'queued — waiting for worker';
         procStep.textContent = job.current_message || '';
-        startBtn.textContent = 'Queued for processing';
+        startBtn.querySelector('span').textContent = 'Queued for processing';
       } else if (job.status === 'processing') {
-        setPill('processing', 'warn');
+        setPill('processing', 'warn live');
+        setStep(step1, 'done');
+        setStep(step2, 'active');
         procBar.style.width = pct + '%';
         procDetail.textContent = pct + '%';
         procStep.textContent = (job.current_step || '') + (job.current_message ? ' — ' + job.current_message : '');
-        startBtn.textContent = job.current_step || 'Processing…';
+        startBtn.querySelector('span').textContent = job.current_step || 'Processing…';
       } else if (job.status === 'completed') {
         setPill('done', 'ok');
+        setStep(step1, 'done');
+        setStep(step2, 'done');
         procBar.style.width = '100%';
         procDetail.textContent = '100%';
         procStep.textContent = 'Complete.';

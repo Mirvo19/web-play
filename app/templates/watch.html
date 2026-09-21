@@ -5,95 +5,89 @@
 {% block header_sub %}{{ video.source_height }}p original · {{ video.cdn_account.name if video.cdn_account else 'Hack Club CDN' }}{% endblock %}
 
 {% block content %}
-<div style="max-width: 1024px; margin: 0 auto;">
-  <div class="player-shell">
-    <video id="videoPlayer" {% if video.thumbnail_url %}poster="{{ video.thumbnail_url }}"{% endif %} playsinline controls></video>
+<style>
+  .watch-grid { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 12px; align-items: start; }
+  @media (max-width: 1020px) { .watch-grid { grid-template-columns: 1fr; } }
+</style>
+<div class="watch-grid">
+  <div class="player-shell" data-enter>
+    <video id="videoPlayer" {% if video.thumbnail_url %}poster="{{ video.thumbnail_url }}"{% endif %} playsinline></video>
     <div class="player-controls">
-      <button type="button" id="playBtn">Play / pause</button>
+      <button type="button" id="playBtn" aria-label="Play or pause"><svg class="ic" aria-hidden="true"><use href="#i-play" id="playGlyph"/></svg></button>
       <span class="num" id="timeDisplay">00:00 / 00:00</span>
-      <div class="seek" id="seekBar" role="slider" aria-label="Seek" tabindex="0"><div id="seekFill"></div></div>
-      <label for="qualitySelect" style="font-size: 12px;">Quality</label>
-      <select id="qualitySelect"><option value="-1">loading…</option></select>
-      <label for="speedSelect" style="font-size: 12px;">Speed</label>
-      <select id="speedSelect">
+      <div class="seek" id="seekBar" role="slider" aria-label="Seek" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" tabindex="0"><div id="seekFill"></div></div>
+      <label for="qualitySelect" style="font-size: 12px; color: #9aa3b4;">Quality</label>
+      <select id="qualitySelect" aria-label="Quality level"><option value="-1">loading…</option></select>
+      <label for="speedSelect" style="font-size: 12px; color: #9aa3b4;">Speed</label>
+      <select id="speedSelect" aria-label="Playback speed">
         <option value="0.5">0.5x</option>
         <option value="1.0" selected>1.0x</option>
         <option value="1.25">1.25x</option>
         <option value="1.5">1.5x</option>
         <option value="2.0">2.0x</option>
       </select>
-      <button type="button" id="fsBtn">Fullscreen</button>
+      <button type="button" id="fsBtn" aria-label="Toggle fullscreen"><svg class="ic" aria-hidden="true"><use href="#i-max"/></svg></button>
     </div>
   </div>
 
-  <div class="panel" style="margin-top: 12px;">
-    <div class="panel-head"><h2>Details</h2><span class="pill ok">{{ video.status }}</span></div>
-    <div class="panel-body">
-      <dl class="kv">
-        <dt>Resolution</dt><dd>{{ video.source_width }}x{{ video.source_height }} @ {{ video.source_fps }}fps</dd>
-        <dt>Duration</dt><dd>{{ round(video.duration, 1) }}s</dd>
-        <dt>Variants</dt><dd>{{ video.variants|length }}</dd>
-        <dt>Uploaded</dt><dd>{{ video.created_at.strftime('%Y-%m-%d %H:%M') if video.created_at else '' }}</dd>
-      </dl>
-      {% if video.description %}<p>{{ video.description }}</p>{% endif %}
-      {% if video.variants %}
-      <table class="tbl">
-        <thead><tr><th>Variant</th><th>Size</th><th>Bitrate</th><th>Playlist</th></tr></thead>
+  <div>
+    <div class="panel" data-enter>
+      <div class="panel-head"><h2>Details</h2><span class="pill ok">{{ video.status }}</span></div>
+      <div class="panel-body">
+        <dl class="kv">
+          <dt>Resolution</dt><dd>{{ video.source_width }}x{{ video.source_height }} @ {{ video.source_fps }}fps</dd>
+          <dt>Duration</dt><dd>{{ round(video.duration, 1) }}s</dd>
+          <dt>Variants</dt><dd>{{ video.variants|length }}</dd>
+          <dt>Uploaded</dt><dd>{{ video.created_at.strftime('%Y-%m-%d %H:%M') if video.created_at else '' }}</dd>
+        </dl>
+        {% if video.description %}<p style="margin-bottom: 0;">{{ video.description }}</p>{% endif %}
+      </div>
+    </div>
+
+    {% if video.variants %}
+    <div class="panel" data-enter>
+      <div class="panel-head"><h2>Renditions</h2></div>
+      <div class="table-scroll"><table class="tbl">
+        <thead><tr><th>Variant</th><th>Size</th><th>Bitrate</th></tr></thead>
         <tbody>
           {% for v in video.variants %}
           <tr>
             <td><strong>{{ v.resolution }}</strong> <span class="mono">{{ v.width }}x{{ v.height }}</span></td>
             <td class="num">{{ round((v.file_size or 0) / 1024 / 1024, 1) }} MB</td>
             <td class="num">{{ round((v.bitrate or 0) / 1000) }} kbps</td>
-            <td><a href="{{ v.playlist_url }}" target="_blank" rel="noopener">open</a></td>
           </tr>
           {% endfor %}
         </tbody>
-      </table>
-      {% endif %}
+      </table></div>
     </div>
-  </div>
+    {% endif %}
 
-  <div class="panel" style="margin-top: 12px;">
-    <div class="panel-head"><h2>Download to this computer</h2></div>
-    <div class="panel-body">
-      <p style="color: var(--muted); font-size: 12px; margin-top: 0;">
-        The video is stored on the CDN as HLS segments + playlists (the original
-        upload is deleted from the server after transcoding to reclaim disk).
-        Save these files to keep a local copy:
-      </p>
-      <table class="tbl">
-        <thead><tr><th>File</th><th class="r">Actions</th></tr></thead>
-        <tbody>
+    <div class="panel" data-enter>
+      <div class="panel-head"><h2><svg class="ic" aria-hidden="true"><use href="#i-download"/></svg>Download to this computer</h2></div>
+      <div class="panel-body">
+        <p style="color: var(--muted); font-size: 12px; margin-top: 0;">
+          Stored on the CDN as HLS segments + playlists (the original upload is
+          deleted from the server after transcoding to reclaim disk).
+        </p>
+        <div class="btn-row" style="flex-direction: column; align-items: stretch;">
           {% if video.master_playlist_url %}
-          <tr>
-            <td><strong>Master playlist</strong><br><span class="mono" style="color: var(--muted);">{{ video.master_playlist_url }}</span></td>
-            <td class="r">
-              <a class="btn" href="{{ video.master_playlist_url }}" download>Download</a>
-              <button type="button" class="btn" data-copy-url="{{ video.master_playlist_url }}">Copy link</button>
-            </td>
-          </tr>
+          <a class="btn" href="{{ video.master_playlist_url }}" download><svg class="ic" aria-hidden="true"><use href="#i-download"/></svg>Master playlist</a>
           {% endif %}
           {% for v in video.variants %}
-          <tr>
-            <td><strong>{{ v.resolution }}</strong> variant playlist<br><span class="mono" style="color: var(--muted);">{{ v.playlist_url }}</span></td>
-            <td class="r">
-              <a class="btn" href="{{ v.playlist_url }}" download>Download</a>
-              <button type="button" class="btn" data-copy-url="{{ v.playlist_url }}">Copy link</button>
-            </td>
-          </tr>
+          <a class="btn" href="{{ v.playlist_url }}" download><svg class="ic" aria-hidden="true"><use href="#i-download"/></svg>{{ v.resolution }} playlist</a>
           {% endfor %}
           {% if video.thumbnail_url %}
-          <tr>
-            <td><strong>Thumbnail</strong><br><span class="mono" style="color: var(--muted);">{{ video.thumbnail_url }}</span></td>
-            <td class="r">
-              <a class="btn" href="{{ video.thumbnail_url }}" download>Download</a>
-              <button type="button" class="btn" data-copy-url="{{ video.thumbnail_url }}">Copy link</button>
-            </td>
-          </tr>
+          <a class="btn" href="{{ video.thumbnail_url }}" download><svg class="ic" aria-hidden="true"><use href="#i-download"/></svg>Thumbnail</a>
           {% endif %}
-        </tbody>
-      </table>
+        </div>
+        <div class="field" style="margin-top: 10px; margin-bottom: 0;">
+          <label for="copyMaster">Copy master URL</label>
+          <div class="btn-row">
+            <input type="text" id="copyMaster" readonly value="{{ video.master_playlist_url or '' }}" style="flex: 1;" aria-label="Master playlist URL">
+            <button type="button" class="btn" data-copy-url="{{ video.master_playlist_url or '' }}" aria-label="Copy master playlist URL"><svg class="ic" aria-hidden="true"><use href="#i-copy"/></svg></button>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -108,13 +102,13 @@
   var masterUrl = boot.master_url;
   var video = document.getElementById('videoPlayer');
   var playBtn = document.getElementById('playBtn');
+  var playGlyph = document.getElementById('playGlyph');
   var seekBar = document.getElementById('seekBar');
   var seekFill = document.getElementById('seekFill');
   var timeDisplay = document.getElementById('timeDisplay');
   var speedSelect = document.getElementById('speedSelect');
   var qualitySelect = document.getElementById('qualitySelect');
   var fsBtn = document.getElementById('fsBtn');
-  var hls = null;
 
   function fmt(s) {
     if (!isFinite(s) || s < 0) return '00:00';
@@ -122,8 +116,13 @@
     return String(m).padStart(2, '0') + ':' + String(sec).padStart(2, '0');
   }
 
+  function showPlaying(playing) {
+    if (playGlyph) playGlyph.setAttribute('href', playing ? '#i-pause' : '#i-play');
+    playBtn.setAttribute('aria-label', playing ? 'Pause' : 'Play');
+  }
+
   if (window.Hls && window.Hls.isSupported() && masterUrl) {
-    hls = new window.Hls({ capLevelToPlayerSize: false });
+    var hls = new window.Hls({ capLevelToPlayerSize: false });
     hls.loadSource(masterUrl);
     hls.attachMedia(video);
     hls.on(window.Hls.Events.MANIFEST_PARSED, function (event, data) {
@@ -143,18 +142,26 @@
     });
     qualitySelect.addEventListener('change', function () {
       var idx = parseInt(qualitySelect.value, 10);
-      if (hls && idx >= 0) hls.currentLevel = idx;
+      if (idx >= 0) hls.currentLevel = idx;
     });
   } else if (masterUrl && video.canPlayType('application/vnd.apple.mpegurl')) {
     video.src = masterUrl;
   }
 
-  playBtn.addEventListener('click', function () {
-    if (video.paused) video.play(); else video.pause();
-  });
+  function togglePlay() {
+    if (video.paused) { video.play(); showPlaying(true); }
+    else { video.pause(); showPlaying(false); }
+  }
+  playBtn.addEventListener('click', togglePlay);
+  video.addEventListener('click', togglePlay);
+  video.addEventListener('play', function () { showPlaying(true); });
+  video.addEventListener('pause', function () { showPlaying(false); });
+
   video.addEventListener('timeupdate', function () {
     if (video.duration) {
-      seekFill.style.width = ((video.currentTime / video.duration) * 100) + '%';
+      var pct = (video.currentTime / video.duration) * 100;
+      seekFill.style.width = pct + '%';
+      seekBar.setAttribute('aria-valuenow', String(Math.round(pct)));
       timeDisplay.textContent = fmt(video.currentTime) + ' / ' + fmt(video.duration);
     }
   });
@@ -165,6 +172,11 @@
     if (video.duration) video.currentTime = Math.min(Math.max(pos, 0), 1) * video.duration;
   }
   seekBar.addEventListener('click', seekFromEvent);
+  seekBar.addEventListener('keydown', function (e) {
+    if (!video.duration) return;
+    if (e.key === 'ArrowRight') video.currentTime = Math.min(video.duration, video.currentTime + 5);
+    else if (e.key === 'ArrowLeft') video.currentTime = Math.max(0, video.currentTime - 5);
+  });
   speedSelect.addEventListener('change', function () {
     video.playbackRate = parseFloat(speedSelect.value);
   });
@@ -177,10 +189,11 @@
   document.addEventListener('keydown', function (e) {
     var tag = (e.target && e.target.tagName) || '';
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-    if (e.code === 'Space') { e.preventDefault(); if (video.paused) video.play(); else video.pause(); }
+    if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
     else if (e.code === 'ArrowRight') video.currentTime = Math.min(video.duration || 0, video.currentTime + 5);
     else if (e.code === 'ArrowLeft') video.currentTime = Math.max(0, video.currentTime - 5);
   });
+
   document.querySelectorAll('[data-copy-url]').forEach(function (btn) {
     btn.addEventListener('click', function () {
       var url = btn.getAttribute('data-copy-url') || '';

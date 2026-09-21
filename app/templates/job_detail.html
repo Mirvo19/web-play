@@ -3,27 +3,29 @@
 {% block title %}Job {{ job.id[:8] }} — HC CDN Player{% endblock %}
 {% block header_title %}Job <span class="mono">{{ job.id[:8] }}</span>{% endblock %}
 {% block header_sub %}{{ job.job_type }} · <span id="jobStatusLine">{{ job.status }}</span>{% endblock %}
+{% block page_actions %}
+<span class="pill dim" id="jobStatusPill">{{ job.status }}</span>
+{% if job.status in ('queued', 'processing', 'receiving') %}
+<button type="button" id="cancelJobBtn" class="btn danger"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg>Cancel job</button>
+{% endif %}
+<a class="btn" href="{{ url_for('views.jobs_list') }}">Back to jobs</a>
+{% endblock %}
 
 {% block content %}
-<div class="panel">
-  <div class="panel-head">
-    <h2 id="jobStepLine">{{ job.current_step }}</h2>
-    <div class="btn-row">
-      {% if job.status in ('queued', 'processing', 'receiving') %}
-      <button type="button" id="cancelJobBtn" class="btn danger">Cancel job</button>
-      {% endif %}
-      <a class="btn" href="{{ url_for('views.jobs_list') }}">Back to jobs</a>
-    </div>
-  </div>
+<div class="panel" data-enter>
+  <div class="panel-head"><h2 id="jobStepLine">{{ job.current_step }}</h2><span class="num" id="jobPct">{{ round(job.progress, 1) }}%</span></div>
   <div class="panel-body">
-    <div class="field">
-      <label>Progress <span class="num" id="jobPct">{{ round(job.progress, 1) }}%</span></label>
-      <div class="bar"><div id="jobBar" style="width: {{ job.progress }}%;"></div></div>
-    </div>
+    <div class="bar" style="margin-bottom: 12px;"><div id="jobBar" style="width: {{ job.progress }}%;"></div></div>
+    <dl class="kv" style="margin-bottom: 12px;">
+      <dt>job id</dt><dd>{{ job.id }}</dd>
+      <dt>video id</dt><dd>{{ job.video_id }}</dd>
+      <dt>type</dt><dd>{{ job.job_type }}</dd>
+    </dl>
+    <div class="alert bad" id="jobError" style="display: none;"></div>
     {% if job.error_message %}
-    <div class="alert bad" id="jobError">{{ job.error_message }}</div>
+    <div class="alert bad">{{ job.error_message }}</div>
     {% endif %}
-    <div class="field">
+    <div class="field" style="margin-bottom: 0;">
       <label>Log stream (live)</label>
       <div id="jobLog" class="logbox">Loading…</div>
     </div>
@@ -42,11 +44,21 @@
   var pct = document.getElementById('jobPct');
   var stepLine = document.getElementById('jobStepLine');
   var statusLine = document.getElementById('jobStatusLine');
+  var statusPill = document.getElementById('jobStatusPill');
   var logBox = document.getElementById('jobLog');
   var cancelBtn = document.getElementById('cancelJobBtn');
+  var errBox = document.getElementById('jobError');
   var lastTs = null;
   var done = false;
   var accumulated = [];
+
+  function pillClass(status) {
+    if (status === 'completed') return 'ok';
+    if (status === 'processing') return 'warn live';
+    if (status === 'queued' || status === 'receiving') return 'info';
+    if (status === 'failed') return 'bad';
+    return 'dim';
+  }
 
   if (cancelBtn) {
     cancelBtn.addEventListener('click', function () {
@@ -87,8 +99,19 @@
         pct.textContent = Math.round(job.progress || 0) + '%';
         stepLine.textContent = job.current_step || '';
         statusLine.textContent = job.status || '';
+        if (statusPill) {
+          statusPill.textContent = job.status || '';
+          statusPill.className = 'pill ' + pillClass(job.status);
+        }
         if (job.status === 'completed') { done = true; HC.toast('success', 'Job completed', 'Finished successfully.'); }
-        else if (job.status === 'failed') { done = true; HC.toast('error', 'Job failed', job.error_message || 'Job failed.'); }
+        else if (job.status === 'failed') {
+          done = true;
+          if (job.error_message && errBox) {
+            errBox.textContent = job.error_message;
+            errBox.style.display = 'flex';
+          }
+          HC.toast('error', 'Job failed', job.error_message || 'Job failed.');
+        }
         else if (job.status === 'cancelled') { done = true; HC.toast('warn', 'Job cancelled', 'Processing was cancelled.'); }
       }
     }).catch(function () { /* transient */ });

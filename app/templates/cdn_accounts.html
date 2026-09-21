@@ -2,19 +2,26 @@
 
 {% block title %}CDN accounts — HC CDN Player{% endblock %}
 {% block header_title %}CDN accounts{% endblock %}
-{% block header_sub %}{{ cdn_accounts|length }} configured · keys encrypted at rest{% endblock %}
+{% block header_sub %}{{ cdn_accounts|length }} configured · keys encrypted at rest · mirrored to Supabase{% endblock %}
+{% block page_actions %}
+<div class="btn-row">
+  <button type="button" class="btn" id="syncMirrorBtn"><svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg>Sync to Supabase</button>
+  <a class="btn" href="/api/cdn-accounts/export" download><svg class="ic" aria-hidden="true"><use href="#i-download"/></svg>Export backup</a>
+</div>
+{% endblock %}
 
 {% block content %}
 {% if cdn_source == 'local-fallback' %}
-<div class="alert warn"><strong>Supabase unreachable — showing local copy.</strong> {{ cdn_source_detail }} New and edited keys still save locally and will mirror on the next successful sync.</div>
+<div class="alert warn"><svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg><span><strong>Supabase unreachable — showing local copy.</strong> {{ cdn_source_detail }} New and edited keys still save locally and will mirror on the next successful sync.</span></div>
 {% elif cdn_source == 'supabase' %}
-<div class="alert" style="border-color: var(--line); color: var(--muted);"><strong>Mirrored to Supabase.</strong> {{ cdn_source_detail }}</div>
+<div class="alert" style="border-color: var(--line);"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg><span><strong>Mirrored to Supabase.</strong> {{ cdn_source_detail }}</span></div>
 {% else %}
-<div class="alert" style="border-color: var(--line); color: var(--muted);"><strong>Local only.</strong> {{ cdn_source_detail }}</div>
+<div class="alert" style="border-color: var(--line);"><span><strong>Local only.</strong> {{ cdn_source_detail }}</span></div>
 {% endif %}
+
 <div class="grid grid-2">
-  <div class="panel">
-    <div class="panel-head"><h2>Add account</h2></div>
+  <div class="panel" data-enter>
+    <div class="panel-head"><h2><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg>Add account</h2></div>
     <div class="panel-body">
       <form id="addCdnForm">
         <div class="field">
@@ -27,36 +34,30 @@
         </div>
         <div class="field">
           <label for="apiKey">API key (bearer token)</label>
-          <input type="password" id="apiKey" placeholder="paste key…" required autocomplete="off">
+          <input type="password" id="apiKey" placeholder="sk_cdn_…" required autocomplete="off">
           <div class="help">Encrypted server-side. Only the last 4 characters are ever displayed.</div>
         </div>
-        <button type="submit" class="btn primary" style="width: 100%;">Save account</button>
+        <button type="submit" class="btn primary" style="width: 100%; justify-content: center;">Save account</button>
       </form>
     </div>
   </div>
-  <div class="panel">
+  <div class="panel" data-enter>
     <div class="panel-head"><h2>Limits</h2></div>
     <div class="panel-body">
       <dl class="kv">
         <dt>File size</dt><dd>100 MB max per object</dd>
-        <dt>Storage</dt><dd>~50 GB per account</dd>
+        <dt>Storage</dt><dd>per-account quota from /api/v4/me</dd>
         <dt>Scaling</dt><dd>add accounts to grow capacity</dd>
       </dl>
-      <p style="color: var(--muted); font-size: 12px;">Segments are split into 5–10 MB HLS chunks automatically, so long videos fit the per-file limit.</p>
+      <p style="color: var(--muted); font-size: 12px; margin-bottom: 0;">Segments are split into 5–10 MB HLS chunks automatically, so long videos fit the per-file limit.</p>
     </div>
   </div>
 </div>
 
-<div class="panel">
-  <div class="panel-head">
-    <h2>Configured accounts</h2>
-    <div class="btn-row">
-      <button type="button" class="btn" id="syncMirrorBtn">Sync to Supabase</button>
-      <a class="btn" href="/api/cdn-accounts/export" download>Export backup</a>
-    </div>
-  </div>
+<div class="panel" data-enter>
+  <div class="panel-head"><h2><svg class="ic" aria-hidden="true"><use href="#i-globe"/></svg>Configured accounts</h2></div>
   {% if cdn_accounts %}
-  <table class="tbl">
+  <div class="table-scroll"><table class="tbl">
     <thead><tr><th>Name</th><th>Provider</th><th>Key</th><th>Storage</th><th>Freshness</th><th>Status</th><th class="r">Actions</th></tr></thead>
     <tbody>
       {% for acc in cdn_accounts %}
@@ -71,11 +72,13 @@
         <td>{% if acc.storage.live %}<span class="pill ok">live</span>{% else %}<span class="pill dim">local estimate</span>{% endif %}</td>
         <td><span class="pill ok">enabled</span></td>
         <td class="r">
-          <button type="button" class="btn" data-test-cdn="{{ acc.id }}">Test</button>
-          <button type="button" class="btn" data-refresh-cdn="{{ acc.id }}">Refresh</button>
-          <button type="button" class="btn" data-reveal-cdn="{{ acc.id }}">Show</button>
-          <button type="button" class="btn" data-rekey-cdn="{{ acc.id }}" data-cdn-name="{{ acc.name }}">Update key</button>
-          <button type="button" class="btn danger" data-delete-cdn="{{ acc.id }}" data-cdn-name="{{ acc.name }}">Delete</button>
+          <div class="btn-row" style="justify-content: flex-end;">
+            <button type="button" class="btn" data-test-cdn="{{ acc.id }}" aria-label="Test connection for {{ acc.name }}">Test</button>
+            <button type="button" class="btn" data-refresh-cdn="{{ acc.id }}" aria-label="Refresh storage for {{ acc.name }}">Refresh</button>
+            <button type="button" class="btn" data-reveal-cdn="{{ acc.id }}" aria-label="Reveal key for {{ acc.name }}">Show</button>
+            <button type="button" class="btn" data-rekey-cdn="{{ acc.id }}" data-cdn-name="{{ acc.name }}">Update key</button>
+            <button type="button" class="btn danger" data-delete-cdn="{{ acc.id }}" data-cdn-name="{{ acc.name }}">Delete</button>
+          </div>
         </td>
       </tr>
       <tr data-reveal-row="{{ acc.id }}" style="display: none;">
@@ -86,9 +89,12 @@
       </tr>
       {% endfor %}
     </tbody>
-  </table>
+  </table></div>
   {% else %}
-  <div class="empty">No CDN accounts yet — add your Hack Club CDN API key above.</div>
+  <div class="empty">
+    <svg class="ic-lg" aria-hidden="true"><use href="#i-globe"/></svg>
+    <p><strong>No CDN accounts yet</strong> — add your Hack Club CDN API key above.</p>
+  </div>
   {% endif %}
 </div>
 {% endblock %}
@@ -146,37 +152,6 @@
     });
   });
 
-  document.querySelectorAll('[data-rekey-cdn]').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      var id = btn.getAttribute('data-rekey-cdn');
-      var name = btn.getAttribute('data-cdn-name') || id;
-      var key = window.prompt('Paste the current API key for "' + name + '":\n(stored encrypted; repairs accounts the server can no longer decrypt)');
-      if (key === null) return;
-      key = key.trim();
-      if (!key) {
-        HC.toast('error', 'Update cancelled', 'Empty key — nothing changed.');
-        return;
-      }
-      btn.disabled = true;
-      fetch('/api/cdn-accounts/' + encodeURIComponent(id), {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ api_key: key })
-      }).then(function (resp) {
-        return resp.json().then(function (data) { return { ok: resp.ok, data: data }; });
-      }).then(function (out) {
-        if (out.ok) {
-          HC.toast('success', 'Key updated', 'Use Test to verify it against the CDN.');
-          setTimeout(function () { window.location.reload(); }, 1200);
-        } else {
-          HC.toast('error', 'Update failed', out.data.error || 'Could not update key.');
-        }
-      }).catch(function () {
-        HC.toast('error', 'Update failed', 'Request failed.');
-      }).finally(function () { btn.disabled = false; });
-    });
-  });
-
   document.querySelectorAll('[data-reveal-cdn]').forEach(function (btn) {
     btn.addEventListener('click', function () {
       var id = btn.getAttribute('data-reveal-cdn');
@@ -208,6 +183,37 @@
       var slot = document.querySelector('[data-reveal-key="' + id + '"]');
       if (slot) slot.textContent = '';
       if (row) row.style.display = 'none';
+    });
+  });
+
+  document.querySelectorAll('[data-rekey-cdn]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var id = btn.getAttribute('data-rekey-cdn');
+      var name = btn.getAttribute('data-cdn-name') || id;
+      var key = window.prompt('Paste the current API key for "' + name + '":\n(stored encrypted; repairs accounts the server can no longer decrypt)');
+      if (key === null) return;
+      key = key.trim();
+      if (!key) {
+        HC.toast('error', 'Update cancelled', 'Empty key — nothing changed.');
+        return;
+      }
+      btn.disabled = true;
+      fetch('/api/cdn-accounts/' + encodeURIComponent(id), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ api_key: key })
+      }).then(function (resp) {
+        return resp.json().then(function (data) { return { ok: resp.ok, data: data }; });
+      }).then(function (out) {
+        if (out.ok) {
+          HC.toast('success', 'Key updated', 'Use Test to verify it against the CDN.');
+          setTimeout(function () { window.location.reload(); }, 1200);
+        } else {
+          HC.toast('error', 'Update failed', out.data.error || 'Could not update key.');
+        }
+      }).catch(function () {
+        HC.toast('error', 'Update failed', 'Request failed.');
+      }).finally(function () { btn.disabled = false; });
     });
   });
 

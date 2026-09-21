@@ -2,27 +2,35 @@
 
 {% block title %}Jobs — HC CDN Player{% endblock %}
 {% block header_title %}Jobs{% endblock %}
-{% block header_sub %}{{ jobs|length }} total · live status refreshes every 2s{% endblock %}
+{% block header_sub %}{{ jobs|length }} total · status refreshes live every 2s{% endblock %}
+{% block page_actions %}
+<div class="btn-row" role="group" aria-label="Filter jobs by status">
+  <button type="button" class="btn" data-filter="all">All</button>
+  <button type="button" class="btn" data-filter="active">Active</button>
+  <button type="button" class="btn" data-filter="done">Done</button>
+  <button type="button" class="btn" data-filter="failed">Failed</button>
+</div>
+{% endblock %}
 
 {% block content %}
-<div class="panel">
-  <div class="panel-head"><h2>Queue</h2></div>
+<div class="panel" data-enter>
+  <div class="panel-head"><h2><svg class="ic" aria-hidden="true"><use href="#i-pulse"/></svg>Execution queue</h2><span class="pill dim" id="visibleCount">{{ jobs|length }} shown</span></div>
   {% if jobs %}
-  <table class="tbl" id="jobsTable">
+  <div class="table-scroll"><table class="tbl" id="jobsTable">
     <thead><tr><th>Job</th><th>Type</th><th>Status</th><th>Progress</th><th>Step</th><th>Started</th><th class="r">Actions</th></tr></thead>
     <tbody>
       {% for job in jobs %}
-      <tr data-job-row="{{ job.id }}">
+      <tr data-job-row="{{ job.id }}" data-status="{{ job.status }}">
         <td class="mono">{{ job.id[:8] }}</td>
         <td>{% if job.job_type == 'transcode_and_upload' %}transcode+upload{% else %}deletion{% endif %}</td>
         <td data-cell="status">
           {% if job.status == 'completed' %}<span class="pill ok">completed</span>
-          {% elif job.status == 'processing' %}<span class="pill warn">processing</span>
-          {% elif job.status == 'queued' %}<span class="pill info">queued</span>
+          {% elif job.status == 'processing' %}<span class="pill warn live">processing</span>
+          {% elif job.status in ('queued', 'receiving') %}<span class="pill info">queued</span>
           {% elif job.status == 'cancelled' %}<span class="pill dim">cancelled</span>
           {% else %}<span class="pill bad">failed</span>{% endif %}
         </td>
-        <td style="min-width: 130px;" data-cell="progress">
+        <td style="min-width: 140px;" data-cell="progress">
           <div class="bar thin"><div style="width: {{ job.progress }}%;"></div></div>
           <span class="num">{{ round(job.progress, 1) }}%</span>
         </td>
@@ -37,9 +45,12 @@
       </tr>
       {% endfor %}
     </tbody>
-  </table>
+  </table></div>
   {% else %}
-  <div class="empty">No jobs recorded yet.</div>
+  <div class="empty">
+    <svg class="ic-lg" aria-hidden="true"><use href="#i-pulse"/></svg>
+    <p><strong>No jobs recorded yet.</strong></p>
+  </div>
   {% endif %}
 </div>
 {% endblock %}
@@ -48,6 +59,40 @@
 <script>
 (function () {
   'use strict';
+
+  /* Client-side status filter (hides rows; polling keeps updating all). */
+  var activeFilter = 'all';
+  var countPill = document.getElementById('visibleCount');
+  function bucket(status) {
+    if (status === 'processing' || status === 'queued' || status === 'receiving') return 'active';
+    if (status === 'completed' || status === 'cancelled') return 'done';
+    return 'failed';
+  }
+  function applyFilter() {
+    var shown = 0;
+    document.querySelectorAll('[data-job-row]').forEach(function (row) {
+      var id = row.getAttribute('data-job-row');
+      var st = row.getAttribute('data-status') || '';
+      var show = activeFilter === 'all' || bucket(st) === activeFilter;
+      row.style.display = show ? '' : 'none';
+      if (show) shown++;
+      row._hcFilter = activeFilter;
+      row._hcId = id;
+    });
+    if (countPill) countPill.textContent = shown + ' shown';
+  }
+  document.querySelectorAll('[data-filter]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      activeFilter = btn.getAttribute('data-filter');
+      document.querySelectorAll('[data-filter]').forEach(function (b) {
+        if (b === btn) b.classList.add('primary');
+        else b.classList.remove('primary');
+      });
+      applyFilter();
+    });
+  });
+  var allBtn = document.querySelector('[data-filter="all"]');
+  if (allBtn) allBtn.classList.add('primary');
 
   document.querySelectorAll('[data-cancel-job]').forEach(function (btn) {
     btn.addEventListener('click', function () {
@@ -71,9 +116,10 @@
     });
   });
 
-  // Live status: refresh rows in place every 2s without a full reload.
+  /* Live status: refresh rows in place every 2s without a full reload. */
   var rows = document.querySelectorAll('[data-job-row]');
   if (!rows.length) return;
+  applyFilter();
   HC.poll(function () {
     rows.forEach(function (row) {
       var id = row.getAttribute('data-job-row');
@@ -82,14 +128,15 @@
         return resp.json();
       }).then(function (job) {
         if (!job) return;
+        row.setAttribute('data-status', job.status || '');
         var statusCell = row.querySelector('[data-cell="status"]');
         var pill = statusCell && statusCell.querySelector('.pill');
         if (pill) {
           pill.textContent = job.status;
           pill.className = 'pill ' + (
             job.status === 'completed' ? 'ok' :
-            job.status === 'processing' ? 'warn' :
-            job.status === 'queued' ? 'info' :
+            job.status === 'processing' ? 'warn live' :
+            (job.status === 'queued' || job.status === 'receiving') ? 'info' :
             job.status === 'failed' ? 'bad' : 'dim');
         }
         var progCell = row.querySelector('[data-cell="progress"]');
@@ -101,6 +148,7 @@
         }
         var stepCell = row.querySelector('[data-cell="step"]');
         if (stepCell) stepCell.textContent = job.current_step || '';
+        applyFilter();
       }).catch(function () { /* transient */ });
     });
   }, 2000);

@@ -1,37 +1,41 @@
 {% extends "base.html" %}
 
 {% block title %}Videos — HC CDN Player{% endblock %}
-{% block header_title %}Videos{% endblock %}
-{% block header_sub %}{{ videos|length }} total · {{ active_job_count }} active jobs{% endblock %}
+{% block header_title %}Video library{% endblock %}
+{% block header_sub %}{{ videos|length }} titles · {{ active_job_count }} active jobs · storage across {{ cdn_accounts|length }} CDN accounts{% endblock %}
+{% block page_actions %}<a class="btn primary" href="{{ url_for('views.upload') }}"><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg>Upload video</a>{% endblock %}
 
 {% block content %}
 <div class="grid grid-4" style="margin-bottom: 12px;">
-  <div class="panel"><div class="panel-body stat">
-    <div class="label">Total videos</div>
-    <div class="value num">{{ videos|length }}</div>
+  <div class="panel" data-enter><div class="panel-body stat">
+    <div class="label"><svg class="ic" aria-hidden="true"><use href="#i-film"/></svg>Total videos</div>
+    <div class="value num" data-tween>{{ videos|length }}</div>
     <div class="hint">Hosted on CDN</div>
   </div></div>
-  <div class="panel"><div class="panel-body stat">
-    <div class="label">CDN used</div>
+  <div class="panel" data-enter><div class="panel-body stat">
+    <div class="label"><svg class="ic" aria-hidden="true"><use href="#i-globe"/></svg>CDN used</div>
     <div class="value num">{{ round(used_cdn_bytes / 1024 / 1024 / 1024, 2) }} GB</div>
     <div class="hint">{{ round(available_cdn_bytes / 1024 / 1024 / 1024, 1) }} GB free</div>
   </div></div>
-  <div class="panel"><div class="panel-body stat">
-    <div class="label">Active jobs</div>
-    <div class="value num">{{ active_job_count }}</div>
+  <div class="panel" data-enter><div class="panel-body stat">
+    <div class="label"><svg class="ic" aria-hidden="true"><use href="#i-pulse"/></svg>Active jobs</div>
+    <div class="value num" data-tween>{{ active_job_count }}</div>
     <div class="hint">Queued / processing</div>
   </div></div>
-  <div class="panel"><div class="panel-body stat">
-    <div class="label">CDN accounts</div>
+  <div class="panel" data-enter><div class="panel-body stat">
+    <div class="label"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg>CDN accounts</div>
     <div class="value num">{{ cdn_accounts|length }}</div>
     <div class="hint">Connected providers</div>
   </div></div>
 </div>
 
 {% if active_job_list %}
-<div class="panel">
-  <div class="panel-head"><h2>Active jobs</h2><a class="btn" href="{{ url_for('views.jobs_list') }}">All jobs</a></div>
-  <table class="tbl">
+<div class="panel" data-enter>
+  <div class="panel-head">
+    <h2><span class="pill warn live">live</span>&nbsp;Active jobs</h2>
+    <a class="btn" href="{{ url_for('views.jobs_list') }}">All jobs</a>
+  </div>
+  <div class="table-scroll"><table class="tbl">
     <thead><tr><th>Job</th><th>Type</th><th>Status</th><th>Progress</th><th>Message</th></tr></thead>
     <tbody>
       {% for job in active_job_list %}
@@ -43,20 +47,20 @@
           {% elif job.status == 'queued' %}<span class="pill info">queued</span>
           {% else %}<span class="pill dim">{{ job.status }}</span>{% endif %}
         </td>
-        <td style="min-width: 140px;"><div class="bar thin"><div style="width: {{ job.progress }}%;"></div></div>
+        <td style="min-width: 150px;"><div class="bar thin"><div style="width: {{ job.progress }}%;"></div></div>
           <span class="num">{{ round(job.progress, 1) }}%</span></td>
         <td>{{ job.current_message or job.current_step }}</td>
       </tr>
       {% endfor %}
     </tbody>
-  </table>
+  </table></div>
 </div>
 {% endif %}
 
-<div class="panel">
-  <div class="panel-head"><h2>Library</h2><a class="btn primary" href="{{ url_for('views.upload') }}">Upload video</a></div>
+<div class="panel" data-enter>
+  <div class="panel-head"><h2><svg class="ic" aria-hidden="true"><use href="#i-film"/></svg>Library</h2></div>
   {% if videos %}
-  <table class="tbl">
+  <div class="table-scroll"><table class="tbl">
     <thead><tr><th>Video</th><th>Resolution</th><th>Duration</th><th>Size</th><th>CDN</th><th>Status</th><th class="r">Actions</th></tr></thead>
     <tbody>
       {% for video in videos %}
@@ -87,9 +91,13 @@
       </tr>
       {% endfor %}
     </tbody>
-  </table>
+  </table></div>
   {% else %}
-  <div class="empty">No videos yet. <a href="{{ url_for('views.upload') }}">Upload the first one</a> to transcode HLS and host it on the CDN.</div>
+  <div class="empty">
+    <svg class="ic-lg" aria-hidden="true"><use href="#i-film"/></svg>
+    <p><strong>No videos yet.</strong></p>
+    <p><a href="{{ url_for('views.upload') }}">Upload the first one</a> to transcode HLS and host it on the CDN.</p>
+  </div>
   {% endif %}
 </div>
 {% endblock %}
@@ -120,6 +128,7 @@
         });
     });
   });
+
   document.querySelectorAll('[data-purge-video]').forEach(function (btn) {
     btn.addEventListener('click', function () {
       var id = btn.getAttribute('data-purge-video');
@@ -141,6 +150,12 @@
           btn.disabled = false;
         });
     });
+  });
+
+  /* Gently tween the two integer KPIs on load (decorative; values are server-rendered). */
+  document.querySelectorAll('[data-tween]').forEach(function (node) {
+    var target = parseFloat(node.textContent);
+    if (!isNaN(target)) HC.tween(node, target, function (v) { return String(Math.round(v)); });
   });
 })();
 </script>
