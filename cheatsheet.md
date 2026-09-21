@@ -174,3 +174,16 @@ jobs; cross-check against the jobs table before deleting by hand.
 
 See `controlpanel.md` §1 (stop units, delete unit files, wipe
 `/opt/hc-cdn-player`, logs, temp dirs, user, nginx site).
+
+## Torrent ingestion
+
+- Requires `aria2c` on the server (`apt install -y aria2`); without it the
+  Torrents tab submits fail closed with "engine unavailable".
+- Flow: Torrents tab → paste magnet / drop `.torrent` → metadata appears →
+  tick files + pick CDN account → Download → progress → validated files hand
+  into normal transcode jobs (linked from the torrent card).
+- Limits live in Settings (concurrency, per-torrent MB, peers, bandwidth
+  cap, wall-clock + metadata timeouts). Downloads run leech-only in a
+  quarantined dir that is wiped on completion, cancel, failure, or timeout.
+- Only pipeline-processable media passes validation (extension + magic
+  bytes + metadata size match); anything else fails the torrent loudly.

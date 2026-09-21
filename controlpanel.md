@@ -75,12 +75,13 @@ ls /opt/hc-cdn-player 2>&1; id hc-cdn 2>&1
 
 ```bash
 apt update && apt upgrade -y
-apt install -y python3 python3-venv python3-pip ffmpeg curl git nginx ufw
+apt install -y python3 python3-venv python3-pip ffmpeg curl git nginx ufw aria2
 
 # Sanity checks
 python3 --version        # need 3.11+
 ffmpeg -version | head -1
 ffprobe -version | head -1
+aria2c --version | head -1   # torrent engine; rest of app works without it
 ```
 
 ---
@@ -90,7 +91,7 @@ ffprobe -version | head -1
 ```bash
 useradd --system --no-create-home --shell /usr/sbin/nologin $APP_USER
 mkdir -p $APP_DIR /var/log/hc-cdn-player /tmp/video-processing
-chown -R $APP_USER:www-data $APP_DIR /var/log/hc-cdn-player
+chown -R $APP_USER:www-data $APP_DIR /var/log/hc-cdn-player /tmp/video-processing
 chmod 0750 $APP_DIR
 ```
 
