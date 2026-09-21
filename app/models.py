@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import func
 from app.utils.security import encrypt_api_key, decrypt_api_key, mask_api_key
 
 db = SQLAlchemy()
@@ -65,11 +66,19 @@ class CDNAccount(db.Model):
                 'checked_at': latest.checked_at.isoformat() if latest.checked_at else None,
                 'live': True,
             }
-        # No live snapshot yet: report honest LOCAL accounting (files this
-        # app has uploaded) and flag it stale — never present this as live
-        # CDN truth.
+        # No live snapshot yet: report honest LOCAL accounting via a SQL
+        # aggregate (files this app has uploaded) and flag it stale — never
+        # present this as live CDN truth.
         cap = 50 * 1024 * 1024 * 1024  # 53,687,091,200 bytes
-        used = sum(f.file_size or 0 for f in self.files if f.upload_status == 'uploaded')
+        used = (
+            db.session.query(func.coalesce(func.sum(VideoFile.file_size), 0))
+            .filter(
+                VideoFile.cdn_account_id == self.id,
+                VideoFile.upload_status == 'uploaded',
+            )
+            .scalar()
+            or 0
+        )
         return {
             'used_bytes': used,
             'available_bytes': max(0, cap - used),
@@ -330,12 +339,12 @@ class Setting(db.Model):
 
     @classmethod
     def get(cls, key: str, default: str = "") -> str:
-        s = cls.query.get(key)
+        s = db.session.get(cls, key)
         return s.value if s else default
 
     @classmethod
     def set(cls, key: str, value: str):
-        s = cls.query.get(key)
+        s = db.session.get(cls, key)
         if not s:
             s = cls(key=key, value=str(value))
             db.session.add(s)

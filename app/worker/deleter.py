@@ -14,7 +14,7 @@ def log_delete_job(job_id: str, message: str, level: str = 'INFO'):
         message=formatted_msg
     )
     db.session.add(log)
-    job = Job.query.get(job_id)
+    job = db.session.get(Job, job_id)
     if job:
         job.current_message = message
     db.session.commit()
@@ -28,7 +28,7 @@ def execute_video_deletion(job_id: str):
     """
     Background worker task for deleting a video and ALL associated CDN files.
     """
-    job = Job.query.get(job_id)
+    job = db.session.get(Job, job_id)
     if not job:
         return
 
@@ -36,7 +36,7 @@ def execute_video_deletion(job_id: str):
     job.started_at = datetime.now(timezone.utc)
     db.session.commit()
 
-    video = Video.query.get(job.video_id)
+    video = db.session.get(Video, job.video_id)
     if not video:
         job.status = 'completed'
         job.progress = 100.0
@@ -54,7 +54,7 @@ def execute_video_deletion(job_id: str):
     total_files = len(files)
     log_delete_job(job_id, f"Found {total_files} tracked CDN files to delete")
 
-    cdn_account = CDNAccount.query.get(video.cdn_account_id) if video.cdn_account_id else None
+    cdn_account = db.session.get(CDNAccount, video.cdn_account_id) if video.cdn_account_id else None
     cdn_provider = CDNManager.get_provider_instance(cdn_account) if cdn_account else None
 
     deleted_count = 0

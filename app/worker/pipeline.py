@@ -27,6 +27,8 @@ from app.models import db, Video, VideoVariant, VideoFile, Job, JobLog, Setting,
 from app.cdn.manager import CDNManager
 from app.utils.uploads import ensure_job_dir, jailed_path, sanitized_filename
 from app.worker.ffmpeg_processor import (
+    VALID_PRESETS,
+    estimate_bandwidth_bps,
     inspect_video,
     determine_quality_targets,
     build_ffmpeg_transcode_command,
@@ -142,7 +144,7 @@ def request_job_cancel(job_id: str):
     If the job is queued/receiving we can cancel it immediately in the DB.
     If it's processing, the worker will pick up the flag within seconds.
     """
-    job = Job.query.get(job_id)
+    job = db.session.get(Job, job_id)
     if not job:
         return None
     if job.status in ('completed', 'failed', 'cancelled'):
@@ -194,7 +196,7 @@ def _check_cancel(job_id: str, ctrl: JobController):
     except Exception:
         pass
     # Also check DB column so the web process can signal us cross-process
-    job = Job.query.get(job_id)
+    job = db.session.get(Job, job_id)
     if job and job.cancel_requested:
         raise JobCancelled()
 
@@ -212,7 +214,7 @@ def _log_job(job_id: str, message: str, level: str = 'INFO', metadata: str = Non
     )
     db.session.add(log)
 
-    job = Job.query.get(job_id)
+    job = db.session.get(Job, job_id)
     if job:
         job.current_message = message
     db.session.commit()
@@ -235,7 +237,7 @@ def _update_stage(job_id: str, stage: str, step: str, progress: float,
         bytes_received, bytes_total,
         cdn_bytes_uploaded, cdn_bytes_total
     """
-    job = Job.query.get(job_id)
+    job = db.session.get(Job, job_id)
     if not job:
         return
     job.stage = stage
@@ -247,6 +249,40 @@ def _update_stage(job_id: str, stage: str, step: str, progress: float,
         if hasattr(job, k):
             setattr(job, k, v)
     db.session.commit()
+
+
+def _get_int_setting(key: str, default: int, low: int, high: int) -> int:
+    """Read an int setting defensively: unparseable or out-of-range values
+    fall back to *default* (clamped) instead of crashing the job."""
+    try:
+        from flask import current_app as _ca
+
+        raw_default = _ca.config.get(
+            {'ffmpeg_threads': 'DEFAULT_FFMPEG_THREADS',
+             'hls_segment_duration': 'HLS_SEGMENT_DURATION'}.get(key, ''),
+            default,
+        )
+        if raw_default in (None, ''):
+            raw_default = default
+        fallback = max(low, min(int(raw_default), high))
+    except (TypeError, ValueError):
+        fallback = max(low, min(default, high))
+    try:
+        val = int(Setting.get(key, str(fallback)))
+    except (TypeError, ValueError):
+        _log_text = f"Setting {key!r} is not a number — using {fallback}"
+        try:
+            current_app.logger.warning(_log_text)
+        except Exception:
+            pass
+        return fallback
+    if val < low or val > high:
+        try:
+            current_app.logger.warning("Setting %r=%r out of range — using %r", key, val, fallback)
+        except Exception:
+            pass
+        return fallback
+    return val
 
 
 def _choose_safe_ffmpeg_threads(requested: int) -> int:
@@ -503,7 +539,7 @@ def execute_video_pipeline(job_id: str):
 
     Working directory: /tmp/video-processing/<job_id>/
     """
-    job = Job.query.get(job_id)
+    job = db.session.get(Job, job_id)
     if not job:
         return
 
@@ -512,7 +548,7 @@ def execute_video_pipeline(job_id: str):
     work_dir = None
 
     try:
-        video = Video.query.get(job.video_id)
+        video = db.session.get(Video, job.video_id)
         if not video:
             job.status = 'failed'
             job.stage = 'failed'
@@ -559,7 +595,7 @@ def execute_video_pipeline(job_id: str):
         db.session.commit()
 
         # Resolve CDN account
-        cdn_account = CDNAccount.query.get(video.cdn_account_id)
+        cdn_account = db.session.get(CDNAccount, video.cdn_account_id)
         if not cdn_account:
             raise RuntimeError('CDN Account not specified or missing.')
 
@@ -629,17 +665,23 @@ def execute_video_pipeline(job_id: str):
         # ---------------------------------------------------------------
         # Stage: ENCODING
         # ---------------------------------------------------------------
-        requested_threads = int(Setting.get(
+        requested_threads = _get_int_setting(
             'ffmpeg_threads',
-            str(current_app.config.get('DEFAULT_FFMPEG_THREADS', 40))
-        ))
+            int(current_app.config.get('DEFAULT_FFMPEG_THREADS', 40)), 1, 128,
+        )
         threads = _choose_safe_ffmpeg_threads(requested_threads)
         preset = Setting.get('ffmpeg_preset', 'veryfast')
-        crf = int(Setting.get('ffmpeg_crf', 23))
-        seg_dur = int(Setting.get(
+        if preset not in VALID_PRESETS:
+            try:
+                current_app.logger.warning("Invalid stored preset %r — using 'veryfast'", preset)
+            except Exception:
+                pass
+            preset = 'veryfast'
+        crf = _get_int_setting('ffmpeg_crf', 23, 0, 51)
+        seg_dur = _get_int_setting(
             'hls_segment_duration',
-            str(current_app.config.get('HLS_SEGMENT_DURATION', 6))
-        ))
+            int(current_app.config.get('HLS_SEGMENT_DURATION', 6)), 2, 15,
+        )
 
         _log_job(job_id, f"FFmpeg settings — threads={threads}, preset={preset}, crf={crf}")
         _update_stage(job_id, 'encoding', 'Encoding video variants', 15.0,
@@ -702,7 +744,7 @@ def execute_video_pipeline(job_id: str):
         with open(master_path, 'w') as f_m:
             f_m.write("#EXTM3U\n#EXT-X-VERSION:3\n\n")
             for target, v_dir, _ in variant_dirs:
-                bw = int(target['height'] * target['width'] * 3.5 * meta['fps'])
+                bw = estimate_bandwidth_bps(target['width'], target['height'])
                 f_m.write(f"#EXT-X-STREAM-INF:BANDWIDTH={bw},"
                           f"RESOLUTION={target['width']}x{target['height']},"
                           f"NAME=\"{target['label']}\"\n")
@@ -747,14 +789,15 @@ def execute_video_pipeline(job_id: str):
         variant_playlist_urls: dict = {}  # label -> cdn_url for playlist.m3u8
         variant_records: dict = {}        # label -> VideoVariant
 
-        # --- Create VideoVariant records first ---
+        # --- Create VideoVariant records first (bandwidth from the single
+        # shared estimator so rows and playlist agree) ---
         for target, v_dir, _ in variant_dirs:
             rec = VideoVariant(
                 video_id=video.id,
                 resolution=target['label'],
                 width=target['width'],
                 height=target['height'],
-                bitrate=int(target['height'] * target['width'] * 3.5)
+                bitrate=estimate_bandwidth_bps(target['width'], target['height']),
             )
             db.session.add(rec)
             db.session.commit()
@@ -900,15 +943,17 @@ def execute_video_pipeline(job_id: str):
             with open(master_path, 'w') as fm:
                 fm.write("#EXTM3U\n#EXT-X-VERSION:3\n\n")
                 for target, _, _ in variant_dirs:
-                    bw = int(target['height'] * target['width'] * 3.5 * meta['fps'])
+                    bw = estimate_bandwidth_bps(target['width'], target['height'])
                     fm.write(f"#EXT-X-STREAM-INF:BANDWIDTH={bw},"
                              f"RESOLUTION={target['width']}x{target['height']},"
                              f"NAME=\"{target['label']}\"\n")
                     url = variant_playlist_urls.get(target['label'],
                                                     f"{target['label']}/playlist.m3u8")
                     fm.write(f"{url}\n\n")
-        except Exception:
-            pass  # Best effort; upload the original if rewrite fails
+        except OSError as e:
+            # Log loudly: uploading the un-rewritten master would publish
+            # relative segment URLs that only resolve locally.
+            _log_job(job_id, f"Master playlist rewrite failed ({e}); uploading as-is", level='WARNING')
 
         master_res = cdn_provider.upload_file(master_path, f"{video.id}/master.m3u8")
         db.session.add(VideoFile(
@@ -975,7 +1020,7 @@ def execute_video_pipeline(job_id: str):
     except JobCancelled:
         db.session.rollback()
         try:
-            job = Job.query.get(job_id)
+            job = db.session.get(Job, job_id)
             if job:
                 job.status = 'cancelled'
                 job.stage = 'cancelled'
@@ -992,7 +1037,7 @@ def execute_video_pipeline(job_id: str):
     except Exception as e:
         db.session.rollback()
         try:
-            job = Job.query.get(job_id)
+            job = db.session.get(Job, job_id)
             if job:
                 job.status = 'failed'
                 job.stage = 'failed'
@@ -1000,7 +1045,7 @@ def execute_video_pipeline(job_id: str):
                 job.completed_at = datetime.now(timezone.utc)
                 db.session.commit()
             if video:
-                video = Video.query.get(video.id)
+                video = db.session.get(Video, video.id)
                 if video:
                     video.status = 'failed'
                     db.session.commit()

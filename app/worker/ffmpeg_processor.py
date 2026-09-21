@@ -14,6 +14,26 @@ RESOLUTION_LADDER = [
     (426,  240,  '240p')
 ]
 
+#: Whitelist of x264 presets accepted anywhere a preset string reaches FFmpeg.
+#: The preset is interpolated into the argv list — never allow arbitrary text.
+VALID_PRESETS = frozenset({
+    'ultrafast', 'superfast', 'veryfast', 'faster', 'fast',
+    'medium', 'slow', 'slower', 'veryslow', 'placebo',
+})
+
+
+def estimate_bandwidth_bps(width: int, height: int) -> int:
+    """Single bitrate estimator shared by variant rows and the master playlist.
+
+    Previously these two disagreed (rows used w*h*3.5, the playlist
+    multiplied by fps on top, yielding absurd ~200 Mbps BANDWIDTH values).
+    One function keeps them consistent.
+    """
+    try:
+        return max(64_000, int(int(width) * int(height) * 3.5))
+    except (TypeError, ValueError):
+        return 0
+
 def inspect_video(file_path: str, ffprobe_bin: str = None) -> Dict[str, Any]:
     """Inspect video file metadata using ffprobe."""
     ffprobe_bin = ffprobe_bin or shutil.which('ffprobe')
@@ -68,22 +88,40 @@ def inspect_video(file_path: str, ffprobe_bin: str = None) -> Dict[str, Any]:
     audio_codec = None
     format_name = None
 
-    format_data = probe_data.get('format', {})
-    duration = float(format_data.get('duration', 0.0))
-    bitrate = int(format_data.get('bit_rate', 0))
+    format_data = probe_data.get('format', {}) if isinstance(probe_data, dict) else {}
+    try:
+        duration = max(0.0, float(format_data.get('duration', 0.0) or 0.0))
+    except (TypeError, ValueError):
+        duration = 0.0
+    try:
+        bitrate = max(0, int(format_data.get('bit_rate', 0) or 0))
+    except (TypeError, ValueError):
+        bitrate = 0
     format_name = format_data.get('format_name')
 
-    for stream in probe_data.get('streams', []):
+    streams = probe_data.get('streams', []) if isinstance(probe_data, dict) else []
+    for stream in streams:
+        if not isinstance(stream, dict):
+            continue
         codec_type = stream.get('codec_type')
         if codec_type == 'video' and width == 0 and height == 0:
-            width = int(stream.get('width', 0) or 0)
-            height = int(stream.get('height', 0) or 0)
-            fps_str = stream.get('r_frame_rate', '30/1')
-            if '/' in fps_str:
-                num, den = fps_str.split('/')
-                fps = float(num) / float(den) if float(den) > 0 else 30.0
-            else:
-                fps = float(fps_str) if fps_str else 30.0
+            try:
+                width = max(0, int(stream.get('width', 0) or 0))
+            except (TypeError, ValueError):
+                width = 0
+            try:
+                height = max(0, int(stream.get('height', 0) or 0))
+            except (TypeError, ValueError):
+                height = 0
+            fps_str = stream.get('r_frame_rate', '30/1') or '30/1'
+            try:
+                if '/' in fps_str:
+                    num, den = fps_str.split('/')
+                    fps = float(num) / float(den) if float(den) > 0 else 30.0
+                else:
+                    fps = float(fps_str) if fps_str else 30.0
+            except (TypeError, ValueError, ZeroDivisionError):
+                fps = 30.0
             video_codec = stream.get('codec_name')
         elif codec_type == 'audio':
             has_audio = True
@@ -92,13 +130,18 @@ def inspect_video(file_path: str, ffprobe_bin: str = None) -> Dict[str, Any]:
     if width == 0 or height == 0:
         raise RuntimeError('Unable to determine video resolution from source file.')
 
+    try:
+        probed_size = int(format_data.get('size', 0) or 0)
+    except (TypeError, ValueError):
+        probed_size = 0
+
     return {
         'width': width,
         'height': height,
         'duration': duration,
         'fps': round(fps, 2),
         'bitrate': bitrate,
-        'size': int(format_data.get('size', os.path.getsize(file_path))),
+        'size': probed_size or os.path.getsize(file_path),
         'has_audio': has_audio,
         'video_codec': video_codec,
         'audio_codec': audio_codec,
@@ -162,7 +205,27 @@ def build_ffmpeg_transcode_command(
     crf: int = 23,
     segment_duration: int = 6
 ) -> Tuple[List[str], str]:
-    """Build FFmpeg command to produce HLS variant playlist."""
+    """Build FFmpeg command to produce HLS variant playlist.
+
+    All encoding parameters are validated here (defence in depth — settings
+    are DB-stored and may predate validation). Raises ValueError on any
+    out-of-range value instead of emitting a corrupt command line.
+    """
+    try:
+        threads = max(1, min(int(threads), 128))
+    except (TypeError, ValueError):
+        raise ValueError(f"Invalid ffmpeg threads value: {threads!r}")
+    if preset not in VALID_PRESETS:
+        raise ValueError(f"Invalid ffmpeg preset: {preset!r}")
+    try:
+        crf = max(0, min(int(crf), 51))
+    except (TypeError, ValueError):
+        raise ValueError(f"Invalid ffmpeg CRF value: {crf!r}")
+    try:
+        segment_duration = max(2, min(int(segment_duration), 15))
+    except (TypeError, ValueError):
+        raise ValueError(f"Invalid HLS segment duration: {segment_duration!r}")
+
     os.makedirs(output_dir, exist_ok=True)
     playlist_path = os.path.join(output_dir, 'playlist.m3u8')
     segment_filename_pattern = os.path.join(output_dir, 'segment_%04d.ts')

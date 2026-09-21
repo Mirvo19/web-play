@@ -6,6 +6,7 @@ import platform
 import socket
 from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify, current_app, url_for
+from sqlalchemy import func
 from werkzeug.utils import secure_filename
 from app.auth import login_required
 from app.models import db, Video, VideoVariant, VideoFile, Job, CDNAccount, Setting, JobLog, StorageSnapshot
@@ -772,9 +773,12 @@ def get_system_stats():
     video_count = Video.query.count()
     variant_count = VideoVariant.query.count()
     cdn_file_count = VideoFile.query.count()
-    cdn_storage_used = sum(
-        f.file_size or 0
-        for f in VideoFile.query.filter_by(upload_status='uploaded').all()
+    # SQL aggregate — never load the whole table into Python to sum it.
+    cdn_storage_used = (
+        db.session.query(func.coalesce(func.sum(VideoFile.file_size), 0))
+        .filter_by(upload_status='uploaded')
+        .scalar()
+        or 0
     )
 
     cdn_accounts = CDNAccount.query.filter_by(enabled=True).all()
@@ -888,20 +892,66 @@ def handle_settings():
             'hls_segment_duration': Setting.get('hls_segment_duration', '6')
         })
 
-    data = request.get_json() or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': 'Request body must be a JSON object'}), 400
+
+    from app.worker.ffmpeg_processor import VALID_PRESETS
+
+    errors = {}
+    updates = {}
+
     if 'ffmpeg_threads' in data:
-        val = int(data['ffmpeg_threads'])
-        if 1 <= val <= 92:
-            Setting.set('ffmpeg_threads', str(val))
+        try:
+            val = int(data['ffmpeg_threads'])
+        except (TypeError, ValueError):
+            errors['ffmpeg_threads'] = 'Must be an integer.'
+        else:
+            if 1 <= val <= 128:
+                updates['ffmpeg_threads'] = str(val)
+            else:
+                errors['ffmpeg_threads'] = 'Must be between 1 and 128.'
     if 'max_concurrent_jobs' in data:
-        val = int(data['max_concurrent_jobs'])
-        if 1 <= val <= 5:
-            Setting.set('max_concurrent_jobs', str(val))
+        try:
+            val = int(data['max_concurrent_jobs'])
+        except (TypeError, ValueError):
+            errors['max_concurrent_jobs'] = 'Must be an integer.'
+        else:
+            if 1 <= val <= 8:
+                updates['max_concurrent_jobs'] = str(val)
+            else:
+                errors['max_concurrent_jobs'] = 'Must be between 1 and 8.'
     if 'ffmpeg_preset' in data:
-        Setting.set('ffmpeg_preset', str(data['ffmpeg_preset']))
+        preset = str(data['ffmpeg_preset'] or '').strip()
+        if preset in VALID_PRESETS:
+            updates['ffmpeg_preset'] = preset
+        else:
+            errors['ffmpeg_preset'] = f"Must be one of: {', '.join(sorted(VALID_PRESETS))}."
     if 'ffmpeg_crf' in data:
-        Setting.set('ffmpeg_crf', str(data['ffmpeg_crf']))
+        try:
+            val = int(data['ffmpeg_crf'])
+        except (TypeError, ValueError):
+            errors['ffmpeg_crf'] = 'Must be an integer.'
+        else:
+            if 0 <= val <= 51:
+                updates['ffmpeg_crf'] = str(val)
+            else:
+                errors['ffmpeg_crf'] = 'Must be between 0 and 51.'
     if 'hls_segment_duration' in data:
-        Setting.set('hls_segment_duration', str(data['hls_segment_duration']))
+        try:
+            val = int(data['hls_segment_duration'])
+        except (TypeError, ValueError):
+            errors['hls_segment_duration'] = 'Must be an integer.'
+        else:
+            if 2 <= val <= 15:
+                updates['hls_segment_duration'] = str(val)
+            else:
+                errors['hls_segment_duration'] = 'Must be between 2 and 15 seconds.'
+
+    if errors:
+        return jsonify({'error': 'Invalid settings values.', 'fields': errors}), 400
+
+    for key, value in updates.items():
+        Setting.set(key, value)
 
     return jsonify({'message': 'Processing settings updated successfully'})
