@@ -81,6 +81,7 @@
 (function () {
   'use strict';
   var activeJobId = null;
+  var activeVideoId = null;
   var pollStop = null;
   var xhr = null;
 
@@ -186,9 +187,10 @@
           return;
         }
         activeJobId = out.data.job_id;
+        activeVideoId = out.data.video_id;
         try { localStorage.setItem('hc_active_job_id', activeJobId); } catch (e) { /* ignore */ }
         startPolling(activeJobId);
-        sendFile(file, activeJobId);
+        sendFile(file, activeVideoId, out.data.upload_url);
       })
       .catch(function () {
         HC.toast('error', 'Upload failed', 'Network error initializing upload.');
@@ -212,7 +214,7 @@
     startBtn.querySelector('span').textContent = 'Uploading… ' + pct + '%';
   }
 
-  function sendFile(file, videoId) {
+  function sendFile(file, videoId, uploadUrl) {
     chunkAborted = false;
     var offset = 0;
     paintUpload(0, file.size);
@@ -244,7 +246,7 @@
       if (offset >= file.size) { completeUpload(); return; }
       var end = Math.min(offset + CHUNK_SIZE, file.size);
       xhr = new XMLHttpRequest();
-      xhr.open('PUT', '/api/videos/' + encodeURIComponent(videoId) + '/upload?offset=' + offset, true);
+      xhr.open('PUT', uploadUrl + '?offset=' + offset, true);
       xhr.onload = function () {
         if (chunkAborted) return;
         var data = {};
@@ -284,6 +286,7 @@
     setStep(step2, null);
     try { localStorage.removeItem('hc_active_job_id'); } catch (e) { /* ignore */ }
     activeJobId = null;
+    activeVideoId = null;
   }
 
   cancelBtn.addEventListener('click', function () {
@@ -309,11 +312,24 @@
 
   function startPolling(jobId) {
     if (pollStop) pollStop();
+    goneNotified = false;
     pollStop = HC.poll(function () { refreshJob(jobId); }, 1500);
+  }
+
+  var goneNotified = false;
+  function jobGone() {
+    /* The polled job was deleted/purged server-side: stop, forget it. */
+    if (pollStop) { pollStop(); pollStop = null; }
+    if (!goneNotified) {
+      goneNotified = true;
+      HC.toast('warn', 'Job gone', 'That job no longer exists on the server (purged or deleted).');
+      resetForm('Start upload');
+    }
   }
 
   function refreshJob(jobId) {
     fetch('/api/jobs/' + encodeURIComponent(jobId)).then(function (resp) {
+      if (resp.status === 404) { jobGone(); return null; }
       if (!resp.ok) return null;
       return resp.json();
     }).then(function (job) {

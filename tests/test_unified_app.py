@@ -601,5 +601,30 @@ class HealthTests(unittest.TestCase):
         self.assertIn(resp.status_code, (200, 503))
 
 
+class UploadPageContractTests(unittest.TestCase):
+    """The chunked uploader must PUT chunks to the init-provided upload URL
+    (which embeds the VIDEO id) and finalize against the video id — never
+    reuse the job id as a video id (regression: every chunk 404'd).
+    Stale polled jobs (404) must stop the poller instead of spamming."""
+
+    def _html(self):
+        import os
+        path = os.path.join(os.path.dirname(__file__), "..", "app",
+                            "templates", "upload.html")
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+    def test_chunk_put_uses_init_upload_url(self):
+        html = self._html()
+        self.assertIn("out.data.upload_url", html)
+        self.assertIn("activeVideoId = out.data.video_id", html)
+        self.assertIn("uploadUrl + '?offset='", html)
+
+    def test_gone_job_stops_poller(self):
+        html = self._html()
+        self.assertIn("jobGone()", html)
+        self.assertIn("resp.status === 404", html)
+
+
 if __name__ == "__main__":
     unittest.main()
