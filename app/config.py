@@ -48,6 +48,17 @@ class Config:
     # Maximum upload file size enforced at application level (default 4 GB)
     MAX_UPLOAD_SIZE_GB = float(os.environ.get('MAX_UPLOAD_SIZE_GB', 4))
 
+    # --- Torrent ingestion (isolated aria2c engine) ---
+    # Quarantine root; '' = sibling of UPLOAD_FOLDER named torrent-quarantine.
+    TORRENT_QUARANTINE_FOLDER = os.environ.get('TORRENT_QUARANTINE_FOLDER', '')
+    TORRENT_ENABLED = os.environ.get('TORRENT_ENABLED', 'true')
+    TORRENT_MAX_CONCURRENT = int(os.environ.get('TORRENT_MAX_CONCURRENT', 1))
+    TORRENT_MAX_TOTAL_MB = int(os.environ.get('TORRENT_MAX_TOTAL_MB', 4096))
+    TORRENT_MAX_PEERS = int(os.environ.get('TORRENT_MAX_PEERS', 50))
+    TORRENT_BANDWIDTH_KBPS = int(os.environ.get('TORRENT_BANDWIDTH_KBPS', 0))
+    TORRENT_TIMEOUT_SEC = int(os.environ.get('TORRENT_TIMEOUT_SEC', 7200))
+    TORRENT_METADATA_TIMEOUT_SEC = int(os.environ.get('TORRENT_METADATA_TIMEOUT_SEC', 120))
+
     # Maximum RAM budget for video processing work (FFmpeg + HLS), in MB.
     # This is a soft guard — the app will refuse to start a new processing job
     # if available system RAM is below this threshold.

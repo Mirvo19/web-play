@@ -363,3 +363,131 @@ class StorageSnapshot(db.Model):
     available_bytes = db.Column(db.BigInteger, default=0)
     total_bytes = db.Column(db.BigInteger, default=0)
     checked_at = db.Column(db.DateTime(timezone=True), default=utc_now)
+
+
+# Valid torrent pipeline states (torrent jobs are separate from transcode Jobs)
+TORRENT_STATES = (
+    'fetching_metadata',
+    'awaiting_selection',
+    'downloading',
+    'validating',
+    'handed_off',
+    'failed',
+    'cancelled',
+)
+
+
+class TorrentJob(db.Model):
+    """Tracks one magnet/.torrent ingestion.
+
+    State machine: fetching_metadata -> awaiting_selection -> downloading
+    -> validating -> handed_off (into the normal Video/Job pipeline).
+    Terminal failures: failed / cancelled. Progress mirrors the Job
+    polling pattern so the frontend reuses the same 2s poll loop.
+    """
+    __tablename__ = 'torrent_jobs'
+
+    id = db.Column(db.String(36), primary_key=True, default=generate_uuid)
+    source_kind = db.Column(db.String(10), nullable=False)  # magnet | file
+    source_ref = db.Column(db.Text, nullable=False)  # magnet URI, or sanitized .torrent filename
+    display_name = db.Column(db.String(255), default='fetching metadata…')
+    state = db.Column(db.String(30), default='fetching_metadata', nullable=False)
+    total_size = db.Column(db.BigInteger, default=0)
+    meta_json = db.Column(db.Text, nullable=True)      # {name,total_size,files:[{index,path,size}]}
+    selected_json = db.Column(db.Text, nullable=True)  # [indexes]
+    progress_json = db.Column(db.Text, nullable=True)  # {index: bytes_done}
+    speed_bps = db.Column(db.Float, default=0.0)
+    error_message = db.Column(db.Text, nullable=True)
+    quarantine_token = db.Column(db.String(64), nullable=False)
+    cdn_account_id = db.Column(db.String(36), db.ForeignKey('cdn_accounts.id'), nullable=True)
+    handed_json = db.Column(db.Text, nullable=True)  # [{video_id, job_id, filename}]
+    video_id = db.Column(db.String(36), db.ForeignKey('videos.id'), nullable=True)
+    pipeline_job_id = db.Column(db.String(36), nullable=True)
+    cancel_requested = db.Column(db.Boolean, default=False, nullable=False)
+
+    created_at = db.Column(db.DateTime(timezone=True), default=utc_now)
+    updated_at = db.Column(db.DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+    completed_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
+    def _json_list(self, field):
+        import json
+        try:
+            value = json.loads(getattr(self, field) or '[]')
+            return value if isinstance(value, list) else []
+        except (ValueError, TypeError):
+            return []
+
+    def _json_dict(self, field):
+        import json
+        try:
+            value = json.loads(getattr(self, field) or '{}')
+            return value if isinstance(value, dict) else {}
+        except (ValueError, TypeError):
+            return {}
+
+    @property
+    def files(self):
+        return self._json_dict('meta_json').get('files', [])
+
+    @property
+    def selected(self):
+        return [int(i) for i in self._json_list('selected_json')]
+
+    def selected_total(self) -> int:
+        by_index = {f.get('index'): f for f in self.files if isinstance(f, dict)}
+        total = 0
+        for i in self.selected:
+            size = (by_index.get(i) or {}).get('size', 0)
+            try:
+                total += max(0, int(size))
+            except (TypeError, ValueError):
+                pass
+        return total
+
+    def bytes_done(self) -> int:
+        done = 0
+        for v in self._json_dict('progress_json').values():
+            try:
+                done += max(0, int(v))
+            except (TypeError, ValueError):
+                pass
+        return done
+
+    def to_dict(self):
+        import json
+        total = self.selected_total()
+        done = self.bytes_done()
+        pct = round(done / total * 100, 1) if total > 0 else 0.0
+        eta = None
+        if self.state == 'downloading' and (self.speed_bps or 0) > 0 and total > done:
+            eta = int((total - done) / self.speed_bps)
+        try:
+            handed = json.loads(self.handed_json or '[]')
+        except (ValueError, TypeError):
+            handed = []
+        return {
+            'id': self.id,
+            'source_kind': self.source_kind,
+            'display_name': self.display_name,
+            'state': self.state,
+            'total_size': self.total_size,
+            'files': self.files,
+            'selected': self.selected,
+            'selected_total': total,
+            'progress': {
+                'bytes_done': done,
+                'bytes_total': total,
+                'pct': pct,
+                'per_file': self._json_dict('progress_json'),
+            },
+            'speed_bps': self.speed_bps or 0.0,
+            'eta_seconds': eta,
+            'error_message': self.error_message,
+            'video_id': self.video_id,
+            'pipeline_job_id': self.pipeline_job_id,
+            'handed': handed if isinstance(handed, list) else [],
+            'message': self.error_message or self.state.replace('_', ' '),
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+            'completed_at': self.completed_at.isoformat() if self.completed_at else None,
+        }

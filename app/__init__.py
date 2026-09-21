@@ -39,6 +39,7 @@ def create_app(config_class=Config):
     from app.auth import auth_bp
     from app.routes.api import api_bp
     from app.routes.health import health_bp
+    from app.routes.torrents import torrents_bp
     from app.routes.views import views_bp
 
     app = Flask(__name__)
@@ -62,6 +63,7 @@ def create_app(config_class=Config):
     app.register_blueprint(auth_bp)
     app.register_blueprint(views_bp)
     app.register_blueprint(api_bp)
+    app.register_blueprint(torrents_bp)
     app.register_blueprint(health_bp)
 
     # Discover FFmpeg and FFprobe executables BEFORE validation, so the
@@ -96,6 +98,20 @@ def create_app(config_class=Config):
             Setting.set('ffmpeg_crf', '23')
         if not Setting.get('hls_segment_duration'):
             Setting.set('hls_segment_duration', str(app.config.get('HLS_SEGMENT_DURATION', 6)))
+
+        # Torrent ingestion defaults (tweakable via Settings UI)
+        _torrent_defaults = {
+            'torrent_enabled': str(app.config.get('TORRENT_ENABLED', 'true')),
+            'torrent_max_concurrent': str(app.config.get('TORRENT_MAX_CONCURRENT', 1)),
+            'torrent_max_total_mb': str(app.config.get('TORRENT_MAX_TOTAL_MB', 4096)),
+            'torrent_max_peers': str(app.config.get('TORRENT_MAX_PEERS', 50)),
+            'torrent_bandwidth_kbps': str(app.config.get('TORRENT_BANDWIDTH_KBPS', 0)),
+            'torrent_timeout_sec': str(app.config.get('TORRENT_TIMEOUT_SEC', 7200)),
+            'torrent_metadata_timeout_sec': str(app.config.get('TORRENT_METADATA_TIMEOUT_SEC', 120)),
+        }
+        for key, value in _torrent_defaults.items():
+            if not Setting.get(key):
+                Setting.set(key, value)
 
         # Create default CDN account if none exist
         if CDNAccount.query.count() == 0:
@@ -138,11 +154,28 @@ def create_app(config_class=Config):
         )
     app.extensions['job_supervisor'] = supervisor
 
+    # --- Torrent coordinator (metadata fetch + selective download) ---
+    # Runs beside the job supervisor in the same process; the actual
+    # peer-network work happens in scrubbed aria2c children (see
+    # app/torrents/engine.py). Idle when torrent_enabled=false.
+    torrent_coord = None
+    if scheduler_effective:
+        from app.torrents.coordinator import TorrentCoordinator
+
+        torrent_coord = TorrentCoordinator(app)
+        torrent_coord.start()
+        log.info("Torrent coordinator attached to app.")
+    app.extensions['torrent_coordinator'] = torrent_coord
+
     def _shutdown_supervisor() -> None:
         sup = app.extensions.get('job_supervisor')
         if sup is not None and getattr(sup, 'running', False):
             log.info("atexit: stopping in-process job supervisor...")
             sup.stop()
+        coord = app.extensions.get('torrent_coordinator')
+        if coord is not None and getattr(coord, 'running', False):
+            log.info("atexit: stopping torrent coordinator...")
+            coord.stop()
 
     # Registered once per process; stop() is idempotent.
     atexit.register(_shutdown_supervisor)

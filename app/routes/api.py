@@ -1105,7 +1105,14 @@ def handle_settings():
             'max_concurrent_jobs': Setting.get('max_concurrent_jobs', '1'),
             'ffmpeg_preset': Setting.get('ffmpeg_preset', 'veryfast'),
             'ffmpeg_crf': Setting.get('ffmpeg_crf', '23'),
-            'hls_segment_duration': Setting.get('hls_segment_duration', '6')
+            'hls_segment_duration': Setting.get('hls_segment_duration', '6'),
+            'torrent_enabled': Setting.get('torrent_enabled', 'true'),
+            'torrent_max_concurrent': Setting.get('torrent_max_concurrent', '1'),
+            'torrent_max_total_mb': Setting.get('torrent_max_total_mb', '4096'),
+            'torrent_max_peers': Setting.get('torrent_max_peers', '50'),
+            'torrent_bandwidth_kbps': Setting.get('torrent_bandwidth_kbps', '0'),
+            'torrent_timeout_sec': Setting.get('torrent_timeout_sec', '7200'),
+            'torrent_metadata_timeout_sec': Setting.get('torrent_metadata_timeout_sec', '120'),
         })
 
     data = request.get_json(silent=True)
@@ -1163,6 +1170,31 @@ def handle_settings():
                 updates['hls_segment_duration'] = str(val)
             else:
                 errors['hls_segment_duration'] = 'Must be between 2 and 15 seconds.'
+
+    def _int_setting(field, low, high, unit=""):
+        if field in data:
+            try:
+                val = int(data[field])
+            except (TypeError, ValueError):
+                errors[field] = 'Must be an integer.'
+            else:
+                if low <= val <= high:
+                    updates[field] = str(val)
+                else:
+                    errors[field] = f"Must be between {low} and {high}{unit}."
+
+    if 'torrent_enabled' in data:
+        flag = str(data['torrent_enabled'] or '').strip().lower()
+        if flag in ('true', 'false'):
+            updates['torrent_enabled'] = flag
+        else:
+            errors['torrent_enabled'] = "Must be 'true' or 'false'."
+    _int_setting('torrent_max_concurrent', 1, 4)
+    _int_setting('torrent_max_total_mb', 100, 16384, ' MB')
+    _int_setting('torrent_max_peers', 5, 500)
+    _int_setting('torrent_bandwidth_kbps', 0, 100000, ' KB/s (0 = uncapped)')
+    _int_setting('torrent_timeout_sec', 60, 86400, ' seconds')
+    _int_setting('torrent_metadata_timeout_sec', 15, 600, ' seconds')
 
     if errors:
         return jsonify({'error': 'Invalid settings values.', 'fields': errors}), 400
