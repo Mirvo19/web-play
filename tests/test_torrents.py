@@ -529,5 +529,54 @@ class PurgeRetryTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 409)
 
 
+class CancelBridgeTests(unittest.TestCase):
+    """A cancel flag set before the worker registers its event must still
+    stop the download (previously lost: the engine only watched the event)."""
+
+    def test_prefixed_flag_cancels_download_without_engine(self):
+        from unittest.mock import patch
+        from app.models import TorrentJob, db
+        from app.torrents.coordinator import TorrentCoordinator
+
+        app = create_app(_test_config())
+        with app.app_context():
+            row = TorrentJob(source_kind="magnet", source_ref="magnet:?x",
+                             quarantine_token="cx1", state="downloading",
+                             cancel_requested=True,
+                             meta_json="{}", selected_json="[1]")
+            db.session.add(row)
+            db.session.commit()
+            tid = row.id
+
+        coord = TorrentCoordinator(app)
+        with patch("app.torrents.engine.run_download") as mock_dl:
+            mock_dl.side_effect = AssertionError("engine must not start")
+            coord._download_worker(tid)
+        with app.app_context():
+            row = db.session.get(TorrentJob, tid)
+            self.assertEqual(row.state, "cancelled")
+
+    def test_prefixed_flag_cancels_metadata_fetch(self):
+        from unittest.mock import patch
+        from app.models import TorrentJob, db
+        from app.torrents.coordinator import TorrentCoordinator
+
+        app = create_app(_test_config())
+        with app.app_context():
+            row = TorrentJob(source_kind="magnet", source_ref="magnet:?x",
+                             quarantine_token="cx2", state="fetching_metadata",
+                             cancel_requested=True)
+            db.session.add(row)
+            db.session.commit()
+            tid = row.id
+
+        coord = TorrentCoordinator(app)
+        with patch("app.torrents.engine.fetch_metadata") as mock_fetch:
+            mock_fetch.side_effect = AssertionError("fetch must not start")
+            coord._fetch_worker(tid)
+        with app.app_context():
+            self.assertEqual(db.session.get(TorrentJob, tid).state, "cancelled")
+
+
 if __name__ == "__main__":
     unittest.main()

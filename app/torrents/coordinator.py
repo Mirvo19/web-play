@@ -243,6 +243,8 @@ class TorrentCoordinator:
                 row = db.session.get(TorrentJob, tid)
                 if row is None or row.state != "fetching_metadata":
                     return
+                if row.cancel_requested or ev.is_set():
+                    raise _eng.TorrentCancelled("cancelled before metadata fetch")
                 base = quarantine_base(self._app)
                 work_dir = _eng.quarantine_for(base, row.quarantine_token)
                 timeout = _tsetting(self._app, "torrent_metadata_timeout_sec", 120, 15, 600)
@@ -283,6 +285,8 @@ class TorrentCoordinator:
                 row = db.session.get(TorrentJob, tid)
                 if row is None or row.state != "downloading":
                     return
+                if row.cancel_requested or ev.is_set():
+                    raise _eng.TorrentCancelled("cancelled before download started")
                 meta = json.loads(row.meta_json or "{}")
                 indices = [int(i) for i in json.loads(row.selected_json or "[]")]
                 base = quarantine_base(self._app)
@@ -297,6 +301,15 @@ class TorrentCoordinator:
                 timeout = _tsetting(self._app, "torrent_timeout_sec", 7200, 60, 86400)
 
                 def _progress(per_file: dict, speed: float) -> None:
+                    # Bridge: a cancel flag set while this worker was starting
+                    # (or across a coordinator restart) must still stop the
+                    # engine — the loop only watches the event, so flip it here.
+                    try:
+                        live = db.session.get(TorrentJob, tid)
+                        if live is not None and live.cancel_requested:
+                            ev.set()
+                    except Exception:
+                        pass
                     now = time.time()
                     if now - last_write[0] < 2.0:
                         return
