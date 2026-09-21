@@ -44,6 +44,13 @@ class Config:
     # if available system RAM is below this threshold.
     PROCESSING_RAM_BUDGET_MB = int(os.environ.get('PROCESSING_RAM_BUDGET_MB', 1500))
 
+    # In-process job scheduler (unified single-process model). Set to 'false'
+    # to run a web-only process with no background execution.
+    ENABLE_JOB_SCHEDULER = os.environ.get('ENABLE_JOB_SCHEDULER', 'true')
+
+    # Seconds between job-queue polls by the in-process supervisor.
+    JOB_POLL_INTERVAL = float(os.environ.get('JOB_POLL_INTERVAL', 2.0))
+
     # Whether to also echo job logs and upload events to stdout (for local debugging)
     LOG_TO_STDOUT = os.environ.get('LOG_TO_STDOUT', 'false').lower() in ('1', 'true', 'yes')
 

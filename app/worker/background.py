@@ -1,189 +1,71 @@
-"""
-HC CDN Player — Background Worker Loop
-=======================================
-This module is ONLY used by worker.py (hc-cdn-worker.service).
-It must NOT be imported or called from the Flask web application.
+"""Deprecated compat shim over :mod:`app.worker.supervisor`.
 
-Key design invariants:
-- ONE instance of this loop runs in the entire deployment (single process).
-- The loop scans for queued jobs every few seconds.
-- It enforces max_concurrent_jobs against HEAVY PROCESSING jobs only.
-- HTTP requests and video viewers are completely independent of this loop.
+The old ``run_worker_forever`` blocking loop (separate worker process) is
+superseded by :class:`~app.worker.supervisor.JobSupervisor`, which runs
+in-process and is started from the app factory. This module keeps the old
+names working for any lingering imports/tests by delegating to the new code.
 """
-import os
-import shutil
-import time
+
+from __future__ import annotations
+
+import logging
 import threading
-from datetime import datetime, timezone
-from flask import Flask
-from app.models import db, Job, Video, Setting
+import time
+
+log = logging.getLogger(__name__)
+
+# Re-exported so `from app.worker.background import X` keeps working.
+from app.worker.supervisor import (  # noqa: F401
+    _execute_job,
+    claim_next_job,
+    cleanup_orphan_workspaces as _cleanup_orphan_workspaces,
+    has_active_job_for_video,
+    recover_interrupted_jobs as _recover_interrupted_jobs,
+    shutdown_requested,
+)
 
 
-def _cleanup_orphan_workspaces(app: Flask):
-    """Remove working directories for jobs that are no longer active."""
-    upload_folder = app.config.get('UPLOAD_FOLDER', '/tmp/video-processing')
-    if not os.path.exists(upload_folder):
-        return
+def start_job_thread(app, job):
+    """Submit a job to a one-off thread (resolves _execute_job lazily so tests
+    can patch ``background._execute_job``)."""
+    import app.worker.background as _self
 
-    with app.app_context():
-        active_job_ids = {
-            j.id for j in Job.query.filter(
-                Job.status.in_(['queued', 'processing', 'receiving'])
-            ).all()
-        }
-
-    for entry in os.listdir(upload_folder):
-        path = os.path.join(upload_folder, entry)
-        if not os.path.isdir(path):
-            continue
-        if entry not in active_job_ids:
-            try:
-                shutil.rmtree(path, ignore_errors=True)
-                print(f"[Worker] Cleaned orphan workspace: {path}")
-            except Exception:
-                pass
-
-
-def _recover_interrupted_jobs(app: Flask):
-    """
-    On worker startup, handle any jobs left in a stuck state from a
-    previous crash or restart.
-
-    - Jobs in 'processing' state: the previous worker was killed mid-job.
-      Re-queue them so they will be retried.
-    - Jobs in 'receiving' state: the HTTP upload was interrupted.
-      Mark them failed — the client must re-upload.
-    """
-    with app.app_context():
-        processing_jobs = Job.query.filter_by(status='processing').all()
-        for j in processing_jobs:
-            j.status = 'queued'
-            j.stage = 'queued'
-            j.current_step = 'Re-queued after restart'
-            j.current_message = 'Job interrupted by restart and re-queued'
-            j.cancel_requested = False
-            print(f"[Worker] Re-queued interrupted job {j.id}")
-
-        receiving_jobs = Job.query.filter_by(status='receiving').all()
-        for j in receiving_jobs:
-            j.status = 'failed'
-            j.stage = 'failed'
-            j.current_step = 'Upload interrupted'
-            j.current_message = 'Upload was interrupted by application restart'
-            j.completed_at = datetime.now(timezone.utc)
-            print(f"[Worker] Marked interrupted upload {j.id} as failed")
-
-        db.session.commit()
-
-
-def _pick_and_start_job(app: Flask):
-    """
-    Try to pick one queued job and launch it in a daemon thread.
-
-    Uses a compare-and-swap pattern:
-      1. Count currently processing jobs.
-      2. If under max_concurrent_jobs, grab the oldest queued job.
-      3. Immediately flip its status to 'processing' and commit — this
-         prevents a second worker instance from also picking the same job.
-    """
-    with app.app_context():
-        max_concurrent = int(
-            Setting.get('max_concurrent_jobs',
-                        str(app.config.get('MAX_CONCURRENT_JOBS', 1)))
-        )
-        running = Job.query.filter_by(status='processing').count()
-
-        if running >= max_concurrent:
-            return  # Slot full — nothing to start
-
-        job = (
-            Job.query
-            .filter_by(status='queued')
-            .order_by(Job.created_at.asc())
-            .first()
-        )
-        if not job:
-            return  # Queue empty
-
-        # Atomically claim the job
-        job.status = 'processing'
-        job.stage = 'inspecting_media'
-        job.started_at = datetime.now(timezone.utc)
-        job.current_step = 'Processing'
-        job.current_message = 'Job picked up by worker'
-        db.session.commit()
-        job_id = job.id
-        job_type = job.job_type
-
-    # Run the job pipeline in a daemon thread so the worker loop stays
-    # responsive for queue-scanning, status updates, and cancellation polls.
     thread = threading.Thread(
-        target=_run_job,
-        args=(app, job_id, job_type),
-        daemon=True,
-        name=f"job-{job_id[:8]}"
+        target=_self._execute_job, args=(app, job.id, job.job_type), daemon=True
     )
     thread.start()
-    print(f"[Worker] Started job {job_id} ({job_type}) on thread {thread.name}")
+    return thread
 
 
-def _run_job(app: Flask, job_id: str, job_type: str):
-    """Execute a single job inside a fresh app context on a worker thread."""
-    from app.worker.pipeline import execute_video_pipeline
-    from app.worker.deleter import execute_video_deletion
+def _pick_and_start_job(app):
+    from app.worker.supervisor import _execute_job as _exec
 
-    with app.app_context():
-        try:
-            if job_type == 'transcode_and_upload':
-                execute_video_pipeline(job_id)
-            elif job_type == 'delete_video':
-                execute_video_deletion(job_id)
-            else:
-                # Unknown job type — mark failed immediately
-                job = Job.query.get(job_id)
-                if job:
-                    job.status = 'failed'
-                    job.stage = 'failed'
-                    job.error_message = f"Unknown job type: {job_type}"
-                    job.completed_at = datetime.now(timezone.utc)
-                    db.session.commit()
-        except Exception as e:
-            # Last-resort error handler — the pipeline should catch its own
-            # exceptions but this prevents a crash from silently hanging a job.
-            try:
-                with app.app_context():
-                    job = Job.query.get(job_id)
-                    if job and job.status == 'processing':
-                        job.status = 'failed'
-                        job.stage = 'failed'
-                        job.error_message = f"Unhandled worker error: {str(e)}"
-                        job.completed_at = datetime.now(timezone.utc)
-                        db.session.commit()
-            except Exception:
-                pass
-            print(f"[Worker] Unhandled exception in job {job_id}: {e}")
+    claimed = claim_next_job(app)
+    if claimed is None:
+        return
+    job_id, job_type = claimed
+    thread = threading.Thread(
+        target=_exec, args=(app, job_id, job_type), daemon=True, name=f"job-{job_id[:8]}"
+    )
+    thread.start()
+    log.info("Started job %s (%s) on thread %s", job_id, job_type, thread.name)
 
 
-# ---------------------------------------------------------------------------
-# Public API — called by worker.py only
-# ---------------------------------------------------------------------------
+def run_worker_forever(app, poll_interval: float = 2.0):
+    """Legacy blocking loop — prefer JobSupervisor; kept for compatibility."""
+    from app.worker.supervisor import _shutdown_event
 
-def run_worker_forever(app: Flask):
-    """
-    Main blocking loop — call this from worker.py (hc-cdn-worker.service).
-    Polls the job queue every 2 seconds and starts eligible jobs.
-    """
-    print("[Worker] Recovering any interrupted jobs from previous run...")
+    log.warning(
+        "run_worker_forever is deprecated; the app factory now starts "
+        "JobSupervisor in-process. This loop still works but stop migrating."
+    )
+    _shutdown_event.clear()
     _recover_interrupted_jobs(app)
-
-    print("[Worker] Cleaning orphaned workspaces...")
     _cleanup_orphan_workspaces(app)
-
-    print("[Worker] Job processing loop running. Waiting for queued jobs...")
-    while True:
+    log.info("Legacy job processing loop running. Waiting for queued jobs...")
+    while not _shutdown_event.is_set():
         try:
             _pick_and_start_job(app)
-        except Exception as e:
-            print(f"[Worker] Error in worker loop: {e}")
-
-        time.sleep(2)
+        except Exception:
+            log.exception("Error in legacy worker loop")
+        time.sleep(poll_interval)

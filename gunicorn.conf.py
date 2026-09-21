@@ -20,11 +20,18 @@
 # =============================================================================
 
 import multiprocessing
+import os
 
 # --- Worker process count ---
-# 2 workers × ~120 MB = ~240 MB for web processes.
-# Leaves ~1.76 GB for OS + worker process + FFmpeg (max ~1.5 GB budget).
-workers = 2
+# SINGLE-PROCESS MODEL: the app owns its background job supervisor
+# (poll loop + ffmpeg executor threads) in-process. Run ONE worker by
+# default so there is exactly one scheduler and one set of ffmpeg slots.
+# If you need more HTTP throughput, raise WEB_CONCURRENCY — the atomic
+# job claim keeps dual pollers from double-executing, but each worker
+# spawns its own ffmpeg pool, so size RAM/CPU accordingly.
+# Tradeoff of 1 worker: less HTTP parallelism for more deterministic
+# job execution and RAM usage on a small box.
+workers = int(os.environ.get("WEB_CONCURRENCY", "1"))
 
 # --- Worker model ---
 # 'sync' + threads is the right choice for I/O-bound Flask apps on CPython.
@@ -51,9 +58,11 @@ max_requests_jitter = 50
 
 # --- App preloading ---
 # Load the Flask app once in master, fork to workers.
-# DO NOT enable this if create_app() starts background threads — but we
-# have removed that so it is safe.
-preload_app = True
+# MUST stay False in the single-process model: create_app() starts
+# supervisor threads, and forking a process with live threads/locks
+# (ThreadPoolExecutor, DB connections) is unsafe. Each worker boots its
+# own supervisor after fork instead.
+preload_app = False
 
 # --- Logging ---
 accesslog = "/var/log/hc-cdn-player/access.log"

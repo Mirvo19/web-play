@@ -1,15 +1,40 @@
+import atexit
+import logging
 import os
-from flask import Flask
-from app.config import Config
-from app.models import db, Setting, CDNAccount
-from app.auth import auth_bp
-from app.routes.views import views_bp
-from app.routes.api import api_bp
 import shutil
 
+from flask import Flask
+
+from app.config import Config
+from app.models import Setting, CDNAccount, db
+
+log = logging.getLogger(__name__)
+
+
+def _configure_logging(app: Flask) -> None:
+    """Single structured logging setup (stdlib only). Full JSON options land in Stage 3."""
+    level = logging.DEBUG if app.debug else logging.INFO
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=level,
+            format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        )
+    else:
+        logging.getLogger().setLevel(level)
+    # Quiet noisy third-party loggers one notch.
+    for noisy in ("werkzeug", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
 def create_app(config_class=Config):
+    from app.auth import auth_bp
+    from app.routes.api import api_bp
+    from app.routes.views import views_bp
+
     app = Flask(__name__)
     app.config.from_object(config_class)
+
+    _configure_logging(app)
 
     # Initialize extensions
     db.init_app(app)
@@ -54,11 +79,6 @@ def create_app(config_class=Config):
             db.session.add(default_cdn)
             db.session.commit()
 
-        # NOTE: The background job worker is NOT started here.
-        # It runs as a completely separate process via worker.py, managed by
-        # hc-cdn-worker.service. This ensures that Gunicorn web workers never
-        # accidentally spawn their own processing loops.
-
         # Discover FFmpeg and FFprobe executables (use absolute paths when available)
         ffmpeg_path = os.environ.get('FFMPEG_BIN') or shutil.which('ffmpeg')
         ffprobe_path = os.environ.get('FFPROBE_BIN') or shutil.which('ffprobe')
@@ -67,16 +87,46 @@ def create_app(config_class=Config):
 
         # Persist discovered paths into settings for visibility (non-blocking)
         try:
-            if ffmpeg_path:
-                Setting.set('ffmpeg_path', ffmpeg_path)
-            else:
-                Setting.set('ffmpeg_path', '')
-            if ffprobe_path:
-                Setting.set('ffprobe_path', ffprobe_path)
-            else:
-                Setting.set('ffprobe_path', '')
-        except Exception:
+            Setting.set('ffmpeg_path', ffmpeg_path or '')
+            Setting.set('ffprobe_path', ffprobe_path or '')
+        except Exception as exc:
             # Do not fail startup for inability to persist settings
-            pass
+            log.warning("Could not persist ffmpeg paths to settings: %s", exc)
+
+    # --- In-process job supervisor (replaces the standalone worker.py) ---
+    # The web process owns its background work now: job polling, ffmpeg
+    # supervision, CDN upload and cleanup all run on executor threads in
+    # this process. Disable explicitly with ENABLE_JOB_SCHEDULER=false
+    # (e.g. for a pure test client, or all-but-one gunicorn worker if you
+    # scale past one process — the atomic claim keeps that safe anyway).
+    enable_scheduler = str(
+        app.config.get('ENABLE_JOB_SCHEDULER', os.environ.get('ENABLE_JOB_SCHEDULER', 'true'))
+    ).lower() in ('1', 'true', 'yes')
+    testing = bool(app.config.get('TESTING', False))
+    supervisor = None
+    if enable_scheduler and not testing:
+        from app.worker.supervisor import JobSupervisor
+
+        poll_interval = float(os.environ.get('JOB_POLL_INTERVAL', '2.0'))
+        max_workers = int(app.config.get('MAX_CONCURRENT_JOBS', 1))
+        supervisor = JobSupervisor(app, poll_interval=poll_interval, max_workers=max_workers)
+        supervisor.start()
+        log.info("In-process job supervisor attached to app (workers=%d).", max_workers)
+    else:
+        log.info(
+            "Job supervisor NOT started (ENABLE_JOB_SCHEDULER=%s, TESTING=%s).",
+            enable_scheduler,
+            testing,
+        )
+    app.extensions['job_supervisor'] = supervisor
+
+    def _shutdown_supervisor() -> None:
+        sup = app.extensions.get('job_supervisor')
+        if sup is not None and getattr(sup, 'running', False):
+            log.info("atexit: stopping in-process job supervisor...")
+            sup.stop()
+
+    # Registered once per process; stop() is idempotent.
+    atexit.register(_shutdown_supervisor)
 
     return app

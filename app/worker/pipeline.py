@@ -102,6 +102,31 @@ def _unregister_controller(job_id: str):
         _active_controllers.pop(job_id, None)
 
 
+def cancel_all_active(reason: str = "server shutdown"):
+    """Signal every in-flight job controller to terminate (graceful shutdown)."""
+    with _controllers_lock:
+        controllers = list(_active_controllers.values())
+    for ctrl in controllers:
+        try:
+            ctrl.request_cancel()
+        except Exception:
+            pass
+    if controllers:
+        try:
+            from flask import current_app
+
+            try:
+                current_app.logger.warning(
+                    "Shutdown (%s): signalled %d active job(s) to cancel",
+                    reason,
+                    len(controllers),
+                )
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Public cancellation API — called by /api/jobs/<id>/cancel (web process
 # writes to DB; worker polls the column every iteration).
@@ -155,6 +180,15 @@ def _check_cancel(job_id: str, ctrl: JobController):
     """Raise JobCancelled if cancellation has been requested via DB or controller."""
     if ctrl.should_cancel():
         raise JobCancelled()
+    try:
+        from app.worker.supervisor import shutdown_requested
+
+        if shutdown_requested():
+            raise JobCancelled()
+    except JobCancelled:
+        raise
+    except Exception:
+        pass
     # Also check DB column so the web process can signal us cross-process
     job = Job.query.get(job_id)
     if job and job.cancel_requested:
