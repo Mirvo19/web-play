@@ -1,11 +1,19 @@
 import logging
 import os
+import random
 import requests
+import time
 from typing import Dict, Any, Tuple
 from urllib.parse import quote, urlparse
 from app.cdn.base import CDNProvider
 
 _logger = logging.getLogger(__name__)
+
+# Retry policy for single-file uploads (transient network/TLS blips must not
+# fail a whole 17-file job). Tunable without a code change:
+#   CDN_UPLOAD_RETRIES=4 CDN_UPLOAD_BACKOFF_SEC=1.5
+_UPLOAD_RETRIES = int(os.environ.get("CDN_UPLOAD_RETRIES", "4"))
+_UPLOAD_BACKOFF_SEC = float(os.environ.get("CDN_UPLOAD_BACKOFF_SEC", "1.5"))
 
 class HackClubCDNProvider(CDNProvider):
     """
@@ -62,30 +70,56 @@ class HackClubCDNProvider(CDNProvider):
 
         upload_url = f"{self.BASE_URL}/api/v4/upload"
 
-        with open(local_file_path, "rb") as f:
-            files = {"file": (filename, f)}
-            response = requests.post(upload_url, headers=headers, files=files, timeout=120)
+        # Retry transient failures (dropped connections, TLS EOF, timeouts,
+        # 429/5xx) with exponential backoff + jitter. Permanent failures
+        # (other 4xx, malformed success bodies) raise immediately.
+        # Note: requests' SSLError subclasses ConnectionError, so it is
+        # covered by the transient branch below.
+        last_error = f"exhausted {_UPLOAD_RETRIES} attempts"
+        for attempt in range(1, max(1, _UPLOAD_RETRIES) + 1):
+            try:
+                with open(local_file_path, "rb") as f:
+                    files = {"file": (filename, f)}
+                    response = requests.post(upload_url, headers=headers, files=files, timeout=120)
+            except (requests.ConnectionError, requests.Timeout) as e:
+                last_error = f"network error: {e}"
+                transient = True
+            else:
+                if response.status_code in (200, 201):
+                    return self._parse_upload_response(response, file_size)
+                if response.status_code == 429 or 500 <= response.status_code < 600:
+                    last_error = f"HTTP {response.status_code}: {response.text[:200]}"
+                    transient = True
+                else:
+                    raise RuntimeError(f"CDN upload failed ({response.status_code}): {response.text}")
 
-        if response.status_code in (200, 201):
-            data = response.json()
-            cdn_url = data.get("url") or data.get("file_url") or data.get("link")
-            if not cdn_url and "id" in data:
-                cdn_url = f"{self.BASE_URL}/{data['id']}"
-            
-            if not cdn_url:
-                raise RuntimeError(f"Upload succeeded but no URL in CDN response: {response.text}")
+            if attempt < max(1, _UPLOAD_RETRIES):
+                delay = _UPLOAD_BACKOFF_SEC * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
+                _logger.warning("CDN upload %s: attempt %d failed (%s); retrying in %.1fs",
+                                filename, attempt, last_error, delay)
+                time.sleep(delay)
 
-            remote_path = data.get("id") or data.get("key")
-            if not remote_path:
-                remote_path = urlparse(cdn_url).path.lstrip('/')
+        raise RuntimeError(f"CDN upload failed for {filename!r}: {last_error}")
 
-            return {
-                "url": cdn_url,
-                "remote_path": remote_path,
-                "file_size": file_size
-            }
-        else:
-            raise RuntimeError(f"CDN upload failed ({response.status_code}): {response.text}")
+    @staticmethod
+    def _parse_upload_response(response, file_size: int) -> Dict[str, Any]:
+        data = response.json()
+        cdn_url = data.get("url") or data.get("file_url") or data.get("link")
+        if not cdn_url and "id" in data:
+            cdn_url = f"{HackClubCDNProvider.BASE_URL}/{data['id']}"
+
+        if not cdn_url:
+            raise RuntimeError(f"Upload succeeded but no URL in CDN response: {response.text}")
+
+        remote_path = data.get("id") or data.get("key")
+        if not remote_path:
+            remote_path = urlparse(cdn_url).path.lstrip('/')
+
+        return {
+            "url": cdn_url,
+            "remote_path": remote_path,
+            "file_size": file_size
+        }
 
     @staticmethod
     def extract_upload_id(remote_path_or_url: str) -> str:

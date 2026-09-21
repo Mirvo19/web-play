@@ -5,6 +5,7 @@ HTTP is fully mocked — these pin the provider to openapi.json 4.0.0:
   DELETE /api/v4/upload/{id} -> {"deleted": true} / 404 not-owned / 401 bad key
 """
 
+import os
 import unittest
 from unittest.mock import patch
 
@@ -128,6 +129,49 @@ class DeleteTests(unittest.TestCase):
     def test_empty_identifier_fails_loudly(self):
         ok, tried = _provider().delete_file("")
         self.assertFalse(ok)
+
+
+class UploadRetryTests(unittest.TestCase):
+    def _temp_file(self):
+        import tempfile
+        fd, path = tempfile.mkstemp(suffix=".ts")
+        with os.fdopen(fd, "wb") as f:
+            f.write(b"x" * 1024)
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        return path
+
+    def test_transient_ssl_blip_retries_then_succeeds(self):
+        import requests as _req
+        path = self._temp_file()
+        err = _req.exceptions.SSLError("EOF occurred in violation of protocol")
+        good = _FakeResponse(201, {"id": "uid-1", "url": "https://cdn.hackclub.com/uid-1/seg.ts"})
+        with patch("app.cdn.hackclub.requests.post") as mock_post, \
+             patch("app.cdn.hackclub.time.sleep") as mock_sleep:
+            mock_post.side_effect = [err, good]
+            out = _provider().upload_file(path, "seg.ts")
+        self.assertEqual(out["remote_path"], "uid-1")
+        self.assertEqual(mock_post.call_count, 2)
+        mock_sleep.assert_called_once()
+
+    def test_permanent_400_fails_fast_without_retry(self):
+        path = self._temp_file()
+        with patch("app.cdn.hackclub.requests.post") as mock_post, \
+             patch("app.cdn.hackclub.time.sleep") as mock_sleep:
+            mock_post.return_value = _FakeResponse(400, {}, text="bad request")
+            with self.assertRaises(RuntimeError):
+                _provider().upload_file(path, "seg.ts")
+        self.assertEqual(mock_post.call_count, 1)
+        mock_sleep.assert_not_called()
+
+    def test_exhausted_retries_raise(self):
+        import requests as _req
+        path = self._temp_file()
+        with patch("app.cdn.hackclub.requests.post") as mock_post, \
+             patch("app.cdn.hackclub.time.sleep"):
+            mock_post.side_effect = _req.ConnectionError("down")
+            with self.assertRaises(RuntimeError):
+                _provider().upload_file(path, "seg.ts")
+        self.assertGreaterEqual(mock_post.call_count, 2)
 
 
 class ExtractIdTests(unittest.TestCase):
