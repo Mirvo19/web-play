@@ -134,7 +134,7 @@ class SubmitTests(unittest.TestCase):
         from app.torrents.coordinator import quarantine_base
 
         fd, blocker = tempfile.mkstemp()
-        os.close(blocker)
+        os.close(fd)
         self.addCleanup(lambda: os.path.exists(blocker) and os.remove(blocker))
         self.app.config["TORRENT_QUARANTINE_FOLDER"] = os.path.join(blocker, "sub")
         with self.assertRaises(OSError):
