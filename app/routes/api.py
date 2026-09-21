@@ -11,6 +11,7 @@ from werkzeug.utils import secure_filename
 from app.auth import login_required
 from app.models import db, Video, VideoVariant, VideoFile, Job, CDNAccount, Setting, JobLog, StorageSnapshot
 from app.cdn.manager import CDNManager
+from app.cdn import supabase_store
 from app.utils.uploads import (
     UploadTooLarge,
     ensure_job_dir,
@@ -580,7 +581,12 @@ def create_cdn_account():
     db.session.add(account)
     db.session.commit()
 
-    return jsonify(account.to_dict(include_storage=False)), 201
+    # Mirror to Supabase best-effort — local commit already succeeded, so a
+    # mirror outage must never fail the request.
+    mirror_ok, mirror_msg = supabase_store.push_account(account)
+    body = account.to_dict(include_storage=False)
+    body['mirror'] = {'ok': mirror_ok, 'message': mirror_msg}
+    return jsonify(body), 201
 
 
 @api_bp.route('/cdn-accounts/<account_id>/test', methods=['POST'])
@@ -637,7 +643,85 @@ def update_cdn_account(account_id):
         account.set_api_key(api_key)
     db.session.commit()
     current_app.logger.warning("CDN account %s credentials updated", account_id)
-    return jsonify(account.to_dict(include_storage=False)), 200
+    mirror_ok, mirror_msg = supabase_store.push_account(account)
+    body = account.to_dict(include_storage=False)
+    body['mirror'] = {'ok': mirror_ok, 'message': mirror_msg}
+    return jsonify(body), 200
+
+
+@api_bp.route('/cdn-accounts/<account_id>/reveal', methods=['POST'])
+@login_required
+def reveal_cdn_key(account_id):
+    """Return the plaintext API key for one account (audit-logged).
+
+    Deliberately one-at-a-time with a confirm in the UI — there is no bulk
+    plaintext export. Each reveal is logged with the session email.
+    """
+    from app.auth import get_current_user
+
+    account = db.session.get(CDNAccount, account_id)
+    if account is None:
+        return jsonify({'error': 'CDN account not found'}), 404
+    try:
+        plaintext = account.get_api_key()
+    except RuntimeError as exc:
+        return jsonify({'error': str(exc)[:300]}), 500
+    if not plaintext:
+        return jsonify({'error': 'No decryptable key stored for this account'}), 409
+    user = get_current_user() or {}
+    current_app.logger.warning(
+        "CDN key revealed for account %s (%s) by session %s",
+        account_id, account.name, user.get('email', '?'),
+    )
+    return jsonify({'id': account.id, 'name': account.name, 'api_key': plaintext}), 200
+
+
+@api_bp.route('/cdn-accounts/export', methods=['GET'])
+@login_required
+def export_cdn_accounts():
+    """Download a backup file of all CDN accounts.
+
+    The file contains the ENCRYPTED credential blobs, not plaintext keys —
+    it is restorable only with the server's CDN_ENCRYPTION_KEY. Save it
+    anywhere you like (password manager, offline disk).
+    """
+    import json as _json
+    from datetime import datetime, timezone as _tz
+    from flask import Response as _Response
+
+    accounts = CDNAccount.query.order_by(CDNAccount.created_at.desc()).all()
+    payload = {
+        'exported_at': datetime.now(_tz.utc).isoformat(),
+        'note': 'Encrypted backup. Restore requires this file + the CDN_ENCRYPTION_KEY it was encrypted with.',
+        'accounts': [
+            {
+                'id': a.id,
+                'name': a.name,
+                'provider': a.provider,
+                'enabled': a.enabled,
+                'encrypted_credentials': a.encrypted_credentials,
+            }
+            for a in accounts
+        ],
+    }
+    stamp = datetime.now(_tz.utc).strftime('%Y%m%d')
+    return _Response(
+        _json.dumps(payload, indent=2),
+        mimetype='application/json',
+        headers={'Content-Disposition': f'attachment; filename=cdn-accounts-backup-{stamp}.json'},
+    )
+
+
+@api_bp.route('/cdn-accounts/sync', methods=['POST'])
+@login_required
+def sync_cdn_accounts():
+    """Push all local accounts to the Supabase mirror now."""
+    if not supabase_store.configured():
+        return jsonify({'error': 'Supabase mirror not configured'}), 503
+    accounts = CDNAccount.query.all()
+    stats = supabase_store.sync_local_to_remote(accounts)
+    status = 200 if stats['failed'] == 0 else 502
+    return jsonify({'success': stats['failed'] == 0, 'sync': stats}), status
 
 
 @api_bp.route('/cdn-accounts/<account_id>', methods=['DELETE'])
@@ -648,6 +732,7 @@ def delete_cdn_account(account_id):
         return jsonify({'error': 'CDN account not found'}), 404
     db.session.delete(account)
     db.session.commit()
+    supabase_store.delete_remote(account_id)
     return jsonify({'message': 'CDN Account deleted successfully'})
 
 

@@ -113,6 +113,34 @@ After a fresh `.env` (new `CDN_ENCRYPTION_KEY`), old accounts show
 **CDN → Delete** stale accounts → **Add** with the real key → **Test**.
 Or restore the old `CDN_ENCRYPTION_KEY` from your `.env` backup.
 
+## Supabase mirror for CDN keys (cloud copy + local fallback)
+
+Keys live in the local DB always; Supabase holds a cloud mirror of the
+*encrypted* blobs. If Supabase is unreachable, the app serves the local copy
+and says so on the CDN page. Plaintext keys never leave the server.
+
+**One-time setup** — run in the Supabase SQL editor, then set
+`SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` in `.env` and restart:
+
+```sql
+create table if not exists cdn_accounts (
+  id text primary key,
+  name text not null,
+  provider text not null default 'Hack Club CDN',
+  encrypted_credentials text not null,
+  enabled boolean not null default true,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+```
+
+**Daily use** — on the CDN page: **Show** reveals one key (confirm first,
+audit-logged server-side with your login email; Hide clears it),
+**Export backup** downloads all accounts as an *encrypted* JSON file (save it
+in your password manager/offline disk — it restores only together with the
+`CDN_ENCRYPTION_KEY` from the same era), **Sync to Supabase** re-pushes
+everything after an outage. There is deliberately no bulk plaintext export.
+
 ## Backup / restore
 
 ```bash

@@ -62,9 +62,33 @@ def job_detail(job_id):
 @views_bp.route('/cdn-accounts')
 @login_required
 def cdn_accounts():
+    from flask import current_app
+    from app.cdn import supabase_store
+
     accounts = CDNAccount.query.order_by(CDNAccount.created_at.desc()).all()
     accounts_info = [acc.to_dict(include_storage=True) for acc in accounts]
-    return render_template('cdn_accounts.html', cdn_accounts=accounts_info)
+
+    # Supabase is the primary mirror; local DB is the fallback. Surface
+    # which source served this page so staleness is never silent. While the
+    # mirror is reachable, lazily push any local accounts missing remotely
+    # (self-repair after an outage).
+    if not supabase_store.configured():
+        source, detail = 'local-only', 'Supabase mirror not configured (need SUPABASE_SERVICE_ROLE_KEY + cdn_accounts table)'
+    else:
+        ok, payload = supabase_store.fetch_remote()
+        if ok:
+            missing = [a for a in accounts if a.id not in supabase_store.remote_ids(payload)]
+            for acc in missing:
+                supabase_store.push_account(acc)
+            source = 'supabase'
+            detail = f"mirrored ({len(payload)} remote accounts" + (f", {len(missing)} re-pushed" if missing else "") + ")"
+        else:
+            source = 'local-fallback'
+            detail = f"Supabase unreachable — serving local copy ({payload})"
+            current_app.logger.warning("CDN page served from local fallback: %s", payload)
+
+    return render_template('cdn_accounts.html', cdn_accounts=accounts_info,
+                           cdn_source=source, cdn_source_detail=detail)
 
 @views_bp.route('/stats')
 @login_required

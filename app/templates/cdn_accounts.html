@@ -5,6 +5,13 @@
 {% block header_sub %}{{ cdn_accounts|length }} configured · keys encrypted at rest{% endblock %}
 
 {% block content %}
+{% if cdn_source == 'local-fallback' %}
+<div class="alert warn"><strong>Supabase unreachable — showing local copy.</strong> {{ cdn_source_detail }} New and edited keys still save locally and will mirror on the next successful sync.</div>
+{% elif cdn_source == 'supabase' %}
+<div class="alert" style="border-color: var(--line); color: var(--muted);"><strong>Mirrored to Supabase.</strong> {{ cdn_source_detail }}</div>
+{% else %}
+<div class="alert" style="border-color: var(--line); color: var(--muted);"><strong>Local only.</strong> {{ cdn_source_detail }}</div>
+{% endif %}
 <div class="grid grid-2">
   <div class="panel">
     <div class="panel-head"><h2>Add account</h2></div>
@@ -41,7 +48,13 @@
 </div>
 
 <div class="panel">
-  <div class="panel-head"><h2>Configured accounts</h2></div>
+  <div class="panel-head">
+    <h2>Configured accounts</h2>
+    <div class="btn-row">
+      <button type="button" class="btn" id="syncMirrorBtn">Sync to Supabase</button>
+      <a class="btn" href="/api/cdn-accounts/export" download>Export backup</a>
+    </div>
+  </div>
   {% if cdn_accounts %}
   <table class="tbl">
     <thead><tr><th>Name</th><th>Provider</th><th>Key</th><th>Storage</th><th>Freshness</th><th>Status</th><th class="r">Actions</th></tr></thead>
@@ -60,8 +73,15 @@
         <td class="r">
           <button type="button" class="btn" data-test-cdn="{{ acc.id }}">Test</button>
           <button type="button" class="btn" data-refresh-cdn="{{ acc.id }}">Refresh</button>
+          <button type="button" class="btn" data-reveal-cdn="{{ acc.id }}">Show</button>
           <button type="button" class="btn" data-rekey-cdn="{{ acc.id }}" data-cdn-name="{{ acc.name }}">Update key</button>
           <button type="button" class="btn danger" data-delete-cdn="{{ acc.id }}" data-cdn-name="{{ acc.name }}">Delete</button>
+        </td>
+      </tr>
+      <tr data-reveal-row="{{ acc.id }}" style="display: none;">
+        <td colspan="7">
+          <span class="mono" data-reveal-key="{{ acc.id }}" style="word-break: break-all;"></span>
+          <button type="button" class="btn" data-hide-reveal="{{ acc.id }}">Hide</button>
         </td>
       </tr>
       {% endfor %}
@@ -156,6 +176,59 @@
       }).finally(function () { btn.disabled = false; });
     });
   });
+
+  document.querySelectorAll('[data-reveal-cdn]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var id = btn.getAttribute('data-reveal-cdn');
+      if (!window.confirm('Reveal the full API key for this account?\nThis is audit-logged on the server.')) return;
+      btn.disabled = true;
+      fetch('/api/cdn-accounts/' + encodeURIComponent(id) + '/reveal', { method: 'POST' })
+        .then(function (resp) { return resp.json().then(function (data) { return { ok: resp.ok, data: data }; }); })
+        .then(function (out) {
+          if (out.ok) {
+            var row = document.querySelector('[data-reveal-row="' + id + '"]');
+            var slot = document.querySelector('[data-reveal-key="' + id + '"]');
+            if (row && slot) {
+              slot.textContent = out.data.api_key || '';
+              row.style.display = '';
+            }
+          } else {
+            HC.toast('error', 'Reveal failed', out.data.error || 'Could not reveal key.');
+          }
+        })
+        .catch(function () { HC.toast('error', 'Reveal failed', 'Request failed.'); })
+        .finally(function () { btn.disabled = false; });
+    });
+  });
+
+  document.querySelectorAll('[data-hide-reveal]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var id = btn.getAttribute('data-hide-reveal');
+      var row = document.querySelector('[data-reveal-row="' + id + '"]');
+      var slot = document.querySelector('[data-reveal-key="' + id + '"]');
+      if (slot) slot.textContent = '';
+      if (row) row.style.display = 'none';
+    });
+  });
+
+  var syncBtn = document.getElementById('syncMirrorBtn');
+  if (syncBtn) {
+    syncBtn.addEventListener('click', function () {
+      syncBtn.disabled = true;
+      fetch('/api/cdn-accounts/sync', { method: 'POST' })
+        .then(function (resp) { return resp.json().then(function (data) { return { ok: resp.ok, data: data }; }); })
+        .then(function (out) {
+          if (out.ok) {
+            var s = (out.data && out.data.sync) || {};
+            HC.toast('success', 'Mirror sync', 'Pushed ' + (s.pushed || 0) + ', failed ' + (s.failed || 0) + '.');
+          } else {
+            HC.toast('error', 'Sync failed', (out.data && (out.data.error || (out.data.sync && out.data.sync.errors || []).join(' '))) || 'Mirror unreachable.');
+          }
+        })
+        .catch(function () { HC.toast('error', 'Sync failed', 'Request failed.'); })
+        .finally(function () { syncBtn.disabled = false; });
+    });
+  }
 
   document.querySelectorAll('[data-delete-cdn]').forEach(function (btn) {
     btn.addEventListener('click', function () {

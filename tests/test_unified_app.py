@@ -286,6 +286,74 @@ class DeleterHonestyTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
 
 
+class MirrorTests(unittest.TestCase):
+    def setUp(self):
+        self.app = create_app(_test_config())
+        self.client = _authed_client(self.app)
+
+    def test_unconfigured_mirror_falls_back(self):
+        from app.cdn import supabase_store
+        with self.app.app_context():
+            self.assertFalse(supabase_store.configured())
+            ok, _ = supabase_store.fetch_remote()
+            self.assertFalse(ok)
+        self.assertEqual(self.client.post("/api/cdn-accounts/sync").status_code, 503)
+        html = self.client.get("/cdn-accounts").data.decode()
+        self.assertIn("Local only", html)
+
+    def test_create_pushes_mirror(self):
+        from unittest.mock import patch
+        from app.cdn import supabase_store
+
+        calls = []
+
+        def fake_request(method, path, **kwargs):
+            calls.append((method, path, kwargs.get("json")))
+            return True, None
+
+        with self.app.app_context():
+            self.app.config["SUPABASE_URL"] = "https://xyz.supabase.co"
+            self.app.config["SUPABASE_SERVICE_ROLE_KEY"] = "service-key"
+        with patch.object(supabase_store, "_request", side_effect=fake_request):
+            resp = self.client.post("/api/cdn-accounts", json={
+                "name": "mir", "provider": "Hack Club CDN", "api_key": "sk_test"})
+        self.assertEqual(resp.status_code, 201)
+        body = resp.get_json()
+        self.assertTrue(body["mirror"]["ok"])
+        self.assertEqual(calls[0][0], "POST")
+        sent = calls[0][2]
+        self.assertNotIn("sk_test", str(sent))
+        self.assertTrue(sent["encrypted_credentials"])
+
+    def test_reveal_returns_plaintext_once(self):
+        with self.app.app_context():
+            from app.models import CDNAccount
+            acc_id = CDNAccount.query.first().id
+        resp = self.client.post(f"/api/cdn-accounts/{acc_id}/reveal")
+        self.assertEqual(resp.status_code, 200)
+        with self.app.app_context():
+            from app.models import CDNAccount, db
+            acc = db.session.get(CDNAccount, acc_id)
+            self.assertEqual(resp.get_json()["api_key"], acc.get_api_key())
+        self.assertEqual(
+            self.client.post("/api/cdn-accounts/nope/reveal").status_code, 404)
+
+    def test_export_has_encrypted_blob_not_plaintext(self):
+        import json as _json
+        with self.app.app_context():
+            from app.models import CDNAccount, db
+            acc = CDNAccount.query.first()
+            acc.set_api_key("sk_super_secret_plaintext")
+            db.session.commit()
+        resp = self.client.get("/api/cdn-accounts/export")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("attachment", resp.headers.get("Content-Disposition", ""))
+        payload = _json.loads(resp.data.decode())
+        blob = payload["accounts"][0]["encrypted_credentials"]
+        self.assertTrue(blob)
+        self.assertNotIn("sk_super_secret_plaintext", resp.data.decode())
+
+
 class SupervisorTests(unittest.TestCase):
     def test_claim_empty_queue_and_clean_stop(self):
         from app.worker.supervisor import JobSupervisor, claim_next_job
