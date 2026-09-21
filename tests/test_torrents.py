@@ -348,8 +348,11 @@ class CoordinatorRecoveryTests(unittest.TestCase):
                 _db.engine.dispose()
 
         with app.app_context():
+            # cancel_requested keeps the coordinator thread from racing
+            # recovery by submitting a real download worker for this row.
             row = TorrentJob(source_kind="magnet", source_ref="magnet:?x",
-                             quarantine_token="rec1", state="downloading")
+                             quarantine_token="rec1", state="downloading",
+                             cancel_requested=True)
             db.session.add(row)
             db.session.commit()
             tid = row.id
