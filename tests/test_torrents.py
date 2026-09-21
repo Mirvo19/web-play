@@ -364,6 +364,51 @@ class CoordinatorRecoveryTests(unittest.TestCase):
         finally:
             coord.stop(timeout=10)
 
+    def test_lone_downloading_row_gets_a_slot(self):
+        """Regression: with max_concurrent=1 a waiting row must be submitted,
+        not counted as occupying its own slot (previous off-by-self bug)."""
+        from concurrent.futures import ThreadPoolExecutor
+        from app.models import TorrentJob, db
+        from app.torrents.coordinator import TorrentCoordinator
+
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+
+        app = create_app(_test_config(SQLALCHEMY_DATABASE_URI=f"sqlite:///{path}"))
+
+        def db_cleanup():
+            with app.app_context():
+                from app.models import db as _db
+                _db.session.remove()
+                _db.engine.dispose()
+            if os.path.exists(path):
+                os.remove(path)
+        self.addCleanup(db_cleanup)
+
+        with app.app_context():
+            row = TorrentJob(source_kind="magnet", source_ref="magnet:?x",
+                             quarantine_token="slot1", state="downloading",
+                             meta_json="{}", selected_json="[1]")
+            db.session.add(row)
+            db.session.commit()
+            tid = row.id
+
+        submitted = []
+
+        class FakeExecutor:
+            def submit(self, fn, *args):
+                submitted.append((fn.__name__, args))
+
+        coord = TorrentCoordinator(app)
+        coord._executor = FakeExecutor()
+        coord._cycle()
+        self.assertEqual([(n, a) for n, a in submitted],
+                         [("_download_worker", (tid,))])
+        # Second cycle must not double-submit the in-flight row.
+        submitted.clear()
+        coord._cycle()
+        self.assertEqual(submitted, [])
+
 
 class TorrentsPageTests(unittest.TestCase):
     def test_tab_renders_with_contracts(self):

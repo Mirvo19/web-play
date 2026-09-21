@@ -188,7 +188,7 @@ class TorrentCoordinator:
             self._stop.wait(self._poll_interval)
 
     def _cycle(self) -> None:
-        from app.models import db, TorrentJob
+        from app.models import TorrentJob
 
         if not torrent_enabled(self._app):
             return
@@ -198,19 +198,20 @@ class TorrentCoordinator:
                            .filter_by(state="fetching_metadata", cancel_requested=False)
                            .order_by(TorrentJob.created_at.asc()).limit(4).all())
             fetch_ids = [r.id for r in fetch_rows]
-            active_downloads = (db.session.query(TorrentJob)
-                                .filter(TorrentJob.state == "downloading").count())
-            slots = max(0, max_concurrent - active_downloads)
-            dl_rows = []
-            if slots > 0:
-                dl_rows = (TorrentJob.query
-                           .filter_by(state="downloading", cancel_requested=False)
-                           .order_by(TorrentJob.created_at.asc()).limit(slots).all())
+            dl_rows = (TorrentJob.query
+                       .filter_by(state="downloading", cancel_requested=False)
+                       .order_by(TorrentJob.created_at.asc())
+                       .limit(max_concurrent * 2).all())
             dl_ids = [r.id for r in dl_rows]
 
+        # Slot accounting uses live in-flight workers, NOT row counts: a
+        # waiting 'downloading' row must never count as occupying a slot
+        # (that off-by-self bug starved max_concurrent=1 setups forever).
         with self._lock:
             fetch_ids = [i for i in fetch_ids if i not in self._inflight]
-            dl_ids = [i for i in dl_ids if i not in self._inflight]
+            running_downloads = sum(1 for v in self._inflight.values() if v == "download")
+            slots = max(0, max_concurrent - running_downloads)
+            dl_ids = [i for i in dl_ids if i not in self._inflight][:slots]
             for i in fetch_ids:
                 self._inflight[i] = "fetch"
             for i in dl_ids:
