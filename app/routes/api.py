@@ -264,6 +264,124 @@ def upload_video_init():
     }), 201
 
 
+def _mark_upload_complete(video, job, file_size: int):
+    """Transition a fully-received upload to queued (shared by all paths)."""
+    video.original_size = file_size
+    job.status = 'queued'
+    job.stage = 'queued'
+    job.current_step = 'Queued for processing'
+    job.current_message = 'Upload complete — awaiting background processing'
+    job.progress = 100.0
+    job.bytes_received = file_size
+    job.bytes_total = file_size
+    job.eta_seconds = None
+    db.session.commit()
+
+
+def _receive_chunk(video, job, save_path: str, max_bytes: int):
+    """Append one resumable chunk (PUT .../upload?offset=N, raw body).
+
+    The client sends fixed-size slices; the server appends exactly at the
+    recorded offset, enforces the running size cap on actual bytes, and
+    reports the new offset so a dropped connection resumes instead of
+    restarting. Offset mismatch -> 409 with the authoritative offset.
+    """
+    try:
+        offset = int(request.args.get('offset', ''))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Query param ?offset=<bytes> is required and must be an integer.'}), 400
+    if offset < 0:
+        return jsonify({'error': 'Negative offsets are not allowed.'}), 400
+
+    try:
+        content_length = int(request.headers.get('Content-Length') or 0)
+    except (TypeError, ValueError):
+        content_length = 0
+    content_length = max(0, content_length)
+    if content_length > 64 * 1024 * 1024:
+        return jsonify({'error': 'Chunk too large (max 64 MB per request).'}), 413
+
+    recorded = job.bytes_received or 0
+    if offset != recorded:
+        db.session.refresh(job)
+        recorded = job.bytes_received or 0
+        if offset != recorded:
+            return jsonify({
+                'error': 'Offset mismatch — resume from the returned offset.',
+                'received': recorded,
+            }), 409
+
+    # Repair invariant file-size == recorded offset (a previously aborted
+    # chunk may have left trailing bytes).
+    try:
+        on_disk = os.path.getsize(save_path)
+    except OSError:
+        on_disk = 0
+    if on_disk != recorded:
+        try:
+            with open(save_path, 'r+b') as repair_f:
+                repair_f.truncate(recorded)
+        except OSError as e:
+            return jsonify({'error': f'Could not repair partial file: {e}'}), 500
+
+    remaining = max_bytes - recorded
+    if remaining <= 0:
+        return jsonify({
+            'error': f"Upload exceeds maximum allowed size of "
+                     f"{current_app.config.get('MAX_UPLOAD_SIZE_GB', 4)} GB."
+        }), 413
+    if content_length > remaining:
+        return jsonify({
+            'error': f"Upload exceeds maximum allowed size of "
+                     f"{current_app.config.get('MAX_UPLOAD_SIZE_GB', 4)} GB."
+        }), 413
+
+    db.session.refresh(job)
+    if job.status == 'cancelled' or job.cancel_requested:
+        return jsonify({'error': 'Upload cancelled.'}), 409
+
+    written = 0
+    try:
+        with open(save_path, 'ab', buffering=4 * 1024 * 1024) as out_f:
+            while True:
+                piece = request.stream.read(1024 * 1024)
+                if not piece:
+                    break
+                if isinstance(piece, str):
+                    piece = piece.encode('utf-8')
+                written += len(piece)
+                if written > remaining:
+                    raise UploadTooLarge(
+                        f"Upload exceeds maximum allowed size of {max_bytes} bytes.")
+                out_f.write(piece)
+    except UploadTooLarge:
+        try:
+            with open(save_path, 'r+b') as trunc_f:
+                trunc_f.truncate(recorded)
+        except OSError:
+            pass
+        return jsonify({
+            'error': f"Upload exceeds maximum allowed size of "
+                     f"{current_app.config.get('MAX_UPLOAD_SIZE_GB', 4)} GB."
+        }), 413
+    except Exception as e:
+        current_app.logger.warning("Chunk append failed for job %s: %s", job.id, e)
+        return jsonify({'error': f'Chunk upload failed: {str(e)}'}), 500
+
+    total = recorded + written
+    job.bytes_received = total
+    declared = job.bytes_total or 0
+    job.progress = min(99.0, total / declared * 100.0) if declared > 0 else 0.0
+    job.stage = 'receiving_upload'
+    job.current_step = 'Receiving upload'
+    job.current_message = (
+        f"Receiving {round(total / 1024**2, 1)} MB"
+        + (f" / {round(declared / 1024**2, 1)} MB" if declared else "")
+    )
+    db.session.commit()
+    return jsonify({'received': total, 'total': declared, 'chunk': written}), 200
+
+
 @api_bp.route('/videos/<video_id>/upload', methods=['PUT', 'POST'])
 @login_required
 def upload_video_streamed(video_id):
@@ -309,17 +427,13 @@ def upload_video_streamed(video_id):
         job.bytes_total = content_length
         db.session.commit()
 
+    # Resumable chunked upload (?offset=N): small independent PUTs that
+    # survive proxy/body timeouts which kill giant single-body uploads.
+    if request.args.get('offset') is not None:
+        return _receive_chunk(video, job, save_path, max_bytes)
+
     def _finish_upload(file_size: int):
-        video.original_size = file_size
-        job.status = 'queued'
-        job.stage = 'queued'
-        job.current_step = 'Queued for processing'
-        job.current_message = 'Upload complete — awaiting background processing'
-        job.progress = 100.0
-        job.bytes_received = file_size
-        job.bytes_total = file_size
-        job.eta_seconds = None
-        db.session.commit()
+        _mark_upload_complete(video, job, file_size)
 
     try:
         # Multipart fallback (older clients) — streamed with the same
@@ -404,6 +518,49 @@ def upload_video_streamed(video_id):
     except Exception as e:
         current_app.logger.warning("Streamed upload failed for job %s: %s", job.id, e)
         return jsonify({'error': f'Upload failed: {str(e)}'}), 500
+
+
+@api_bp.route('/videos/<video_id>/complete', methods=['POST'])
+@login_required
+def complete_chunked_upload(video_id):
+    """Finalize a chunked upload: verify size and mark the job queued.
+
+    Rejects empty or short uploads (declared size known from init) so a
+    silently truncated transfer can never enter the transcode pipeline.
+    """
+    video = Video.query.get_or_404(video_id)
+    job = (
+        Job.query
+        .filter_by(video_id=video.id, status='receiving')
+        .order_by(Job.created_at.desc())
+        .first()
+    )
+    if not job:
+        return jsonify({'error': 'No active upload job found for this video'}), 400
+
+    upload_folder = current_app.config.get('UPLOAD_FOLDER', '/tmp/video-processing')
+    work_dir = ensure_job_dir(upload_folder, job.id)
+    filename = sanitized_filename(video.original_filename or 'source.mp4')
+    save_path = jailed_path(work_dir, filename)
+
+    try:
+        file_size = os.path.getsize(save_path)
+    except OSError:
+        file_size = 0
+    if file_size == 0:
+        return jsonify({'error': 'Upload is empty — no bytes were received.'}), 400
+    job.bytes_received = file_size
+    declared = job.bytes_total or 0
+    if declared > 0 and file_size != declared:
+        db.session.commit()
+        return jsonify({
+            'error': f'Upload incomplete: received {file_size} of {declared} bytes. Resume from the missing offset.',
+            'received': file_size,
+            'total': declared,
+        }), 400
+
+    _mark_upload_complete(video, job, file_size)
+    return jsonify({'message': 'Upload saved', 'size': file_size}), 201
 
 
 # ---------------------------------------------------------------------------

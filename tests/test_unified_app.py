@@ -144,6 +144,89 @@ class UploadHardeningTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 413)
 
 
+class ChunkedUploadTests(unittest.TestCase):
+    def setUp(self):
+        self.app = create_app(_test_config(MAX_UPLOAD_SIZE_GB=1))
+        self.client = _authed_client(self.app)
+        with self.app.app_context():
+            from app.models import CDNAccount
+            self.account_id = CDNAccount.query.first().id
+
+    def _init(self, size=300):
+        resp = self.client.post("/api/videos/upload/init", data={
+            "title": "chunked", "description": "", "cdn_account_id": self.account_id,
+            "filename": "big.bin", "size": str(size)})
+        self.assertEqual(resp.status_code, 201)
+        return resp.get_json()["video_id"]
+
+    def _put(self, vid, offset, body):
+        return self.client.put(
+            f"/api/videos/{vid}/upload?offset={offset}", data=body,
+            content_type="application/octet-stream")
+
+    def test_chunks_append_and_complete_queues(self):
+        from app.models import Job, db
+
+        vid = self._init()
+        off = 0
+        for _ in range(3):
+            resp = self._put(vid, off, b"y" * 100)
+            self.assertEqual(resp.status_code, 200)
+            off = resp.get_json()["received"]
+        self.assertEqual(off, 300)
+        resp = self.client.post(f"/api/videos/{vid}/complete")
+        self.assertEqual(resp.status_code, 201)
+        with self.app.app_context():
+            job = Job.query.filter_by(video_id=vid).first()
+            self.assertEqual(job.status, "queued")
+            self.assertEqual(job.bytes_received, 300)
+
+    def test_offset_mismatch_returns_authoritative_offset(self):
+        vid = self._init()
+        resp = self._put(vid, 50, b"x" * 10)
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.get_json()["received"], 0)
+        # Resume from the returned offset works.
+        resp = self._put(vid, 0, b"x" * 10)
+        self.assertEqual(resp.status_code, 200)
+
+    def test_short_complete_rejected(self):
+        vid = self._init(size=300)
+        self._put(vid, 0, b"z" * 100)
+        resp = self.client.post(f"/api/videos/{vid}/complete")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_empty_complete_rejected(self):
+        vid = self._init(size=100)
+        resp = self.client.post(f"/api/videos/{vid}/complete")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_chunk_over_cap_rejected(self):
+        from app.models import Job, db
+
+        # ~1 MB cap via config; a 2 MB-declared upload's second chunk overflows.
+        app = create_app(_test_config(MAX_UPLOAD_SIZE_GB=0.001))
+        client = _authed_client(app)
+        with app.app_context():
+            from app.models import CDNAccount
+            acc = CDNAccount.query.first().id
+        init = client.post("/api/videos/upload/init", data={
+            "title": "t", "description": "", "cdn_account_id": acc,
+            "filename": "b.bin", "size": "900000"})
+        vid = init.get_json()["video_id"]
+        resp = client.put(f"/api/videos/{vid}/upload?offset=0", data=b"q" * 1000,
+                          content_type="application/octet-stream")
+        self.assertEqual(resp.status_code, 200)
+        # declared 2MB but cap ~1MB: next chunk exceeds running cap.
+        resp = client.put(f"/api/videos/{vid}/upload?offset=1000", data=b"q" * 2000000,
+                          content_type="application/octet-stream")
+        self.assertEqual(resp.status_code, 413)
+        with app.app_context():
+            job = Job.query.filter_by(video_id=vid).first()
+            # Failed chunk left no trailing bytes behind the recorded offset.
+            self.assertEqual(job.bytes_received, 1000)
+
+
 class PurgeTests(unittest.TestCase):
     def setUp(self):
         self.app = create_app(_test_config())

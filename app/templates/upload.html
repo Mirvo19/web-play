@@ -188,7 +188,7 @@
         activeJobId = out.data.job_id;
         try { localStorage.setItem('hc_active_job_id', activeJobId); } catch (e) { /* ignore */ }
         startPolling(activeJobId);
-        sendFile(out.data.upload_url, file);
+        sendFile(file, activeJobId);
       })
       .catch(function () {
         HC.toast('error', 'Upload failed', 'Network error initializing upload.');
@@ -198,36 +198,82 @@
       });
   });
 
-  function sendFile(url, file) {
-    xhr = new XMLHttpRequest();
-    xhr.open('PUT', url, true);
-    xhr.upload.onprogress = function (ev) {
-      if (ev.lengthComputable) {
-        var pct = Math.round((ev.loaded / ev.total) * 100);
-        uploadBar.style.width = pct + '%';
-        uploadDetail.textContent = (ev.loaded / 1048576).toFixed(0) + ' / ' + (ev.total / 1048576).toFixed(0) + ' MB';
-        startBtn.querySelector('span').textContent = 'Uploading… ' + pct + '%';
-      } else {
-        uploadDetail.textContent = 'sending…';
-      }
-    };
-    xhr.onload = function () {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        uploadBar.style.width = '100%';
-        uploadDetail.textContent = 'complete';
-        setStep(step1, 'done');
-        setStep(step2, 'active');
-        startBtn.querySelector('span').textContent = 'Upload complete — queued';
-      } else {
-        HC.toast('error', 'Upload failed', xhr.responseText || 'Upload error.');
-        resetForm('Start upload');
-      }
-    };
-    xhr.onerror = function () {
-      HC.toast('error', 'Upload failed', 'Network error during upload.');
+  /* Chunked resumable upload: 8 MB slices, per-chunk retry, server-side
+     offset tracking. Survives proxy/body timeouts that kill giant single
+     PUTs — a dropped connection resumes from the confirmed offset. */
+  var CHUNK_SIZE = 8 * 1024 * 1024;
+  var CHUNK_RETRIES = 3;
+  var chunkAborted = false;
+
+  function paintUpload(sent, total) {
+    var pct = total > 0 ? Math.round((sent / total) * 100) : 0;
+    uploadBar.style.width = pct + '%';
+    uploadDetail.textContent = (sent / 1048576).toFixed(0) + ' / ' + (total / 1048576).toFixed(0) + ' MB';
+    startBtn.querySelector('span').textContent = 'Uploading… ' + pct + '%';
+  }
+
+  function sendFile(file, videoId) {
+    chunkAborted = false;
+    var offset = 0;
+    paintUpload(0, file.size);
+
+    function fail(msg) {
+      HC.toast('error', 'Upload failed', msg);
       resetForm('Start upload');
-    };
-    xhr.send(file);
+    }
+
+    function completeUpload() {
+      fetch('/api/videos/' + encodeURIComponent(videoId) + '/complete', { method: 'POST' })
+        .then(function (resp) { return resp.json().then(function (data) { return { resp: resp, data: data }; }); })
+        .then(function (out) {
+          if (out.resp.ok) {
+            uploadBar.style.width = '100%';
+            uploadDetail.textContent = 'complete';
+            setStep(step1, 'done');
+            setStep(step2, 'active');
+            startBtn.querySelector('span').textContent = 'Upload complete — queued';
+          } else {
+            fail(out.data.error || 'Could not finalize upload.');
+          }
+        })
+        .catch(function () { fail('Network error finalizing upload.'); });
+    }
+
+    function putChunk(retry) {
+      if (chunkAborted) return;
+      if (offset >= file.size) { completeUpload(); return; }
+      var end = Math.min(offset + CHUNK_SIZE, file.size);
+      xhr = new XMLHttpRequest();
+      xhr.open('PUT', '/api/videos/' + encodeURIComponent(videoId) + '/upload?offset=' + offset, true);
+      xhr.onload = function () {
+        if (chunkAborted) return;
+        var data = {};
+        try { data = JSON.parse(xhr.responseText); } catch (e) { data = {}; }
+        if (xhr.status === 200) {
+          offset = (data.received !== undefined && data.received !== null) ? data.received : end;
+          paintUpload(offset, file.size);
+          putChunk(0);
+        } else if (xhr.status === 409 && data.received !== undefined) {
+          /* Server-side offset wins — resume exactly where it says. */
+          offset = data.received;
+          paintUpload(offset, file.size);
+          putChunk(0);
+        } else if (xhr.status === 413) {
+          fail(data.error || 'Upload exceeds the allowed size.');
+        } else if (retry < CHUNK_RETRIES) {
+          setTimeout(function () { putChunk(retry + 1); }, 1000 * (retry + 1));
+        } else {
+          fail((data && data.error) || ('Chunk failed (HTTP ' + xhr.status + ') after retries.'));
+        }
+      };
+      xhr.onerror = function () {
+        if (chunkAborted) return;
+        if (retry < CHUNK_RETRIES) setTimeout(function () { putChunk(retry + 1); }, 1000 * (retry + 1));
+        else fail('Network error during upload.');
+      };
+      xhr.send(file.slice(offset, end));
+    }
+    putChunk(0);
   }
 
   function resetForm(label) {
@@ -241,6 +287,7 @@
   }
 
   cancelBtn.addEventListener('click', function () {
+    chunkAborted = true;
     if (xhr) { try { xhr.abort(); } catch (e) { /* ignore */ } xhr = null; }
     if (!activeJobId) return;
     cancelBtn.disabled = true;
