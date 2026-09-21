@@ -53,6 +53,49 @@
       {% endif %}
     </div>
   </div>
+
+  <div class="panel" style="margin-top: 12px;">
+    <div class="panel-head"><h2>Download to this computer</h2></div>
+    <div class="panel-body">
+      <p style="color: var(--muted); font-size: 12px; margin-top: 0;">
+        The video is stored on the CDN as HLS segments + playlists (the original
+        upload is deleted from the server after transcoding to reclaim disk).
+        Save these files to keep a local copy:
+      </p>
+      <table class="tbl">
+        <thead><tr><th>File</th><th class="r">Actions</th></tr></thead>
+        <tbody>
+          {% if video.master_playlist_url %}
+          <tr>
+            <td><strong>Master playlist</strong><br><span class="mono" style="color: var(--muted);">{{ video.master_playlist_url }}</span></td>
+            <td class="r">
+              <a class="btn" href="{{ video.master_playlist_url }}" download>Download</a>
+              <button type="button" class="btn" data-copy-url="{{ video.master_playlist_url }}">Copy link</button>
+            </td>
+          </tr>
+          {% endif %}
+          {% for v in video.variants %}
+          <tr>
+            <td><strong>{{ v.resolution }}</strong> variant playlist<br><span class="mono" style="color: var(--muted);">{{ v.playlist_url }}</span></td>
+            <td class="r">
+              <a class="btn" href="{{ v.playlist_url }}" download>Download</a>
+              <button type="button" class="btn" data-copy-url="{{ v.playlist_url }}">Copy link</button>
+            </td>
+          </tr>
+          {% endfor %}
+          {% if video.thumbnail_url %}
+          <tr>
+            <td><strong>Thumbnail</strong><br><span class="mono" style="color: var(--muted);">{{ video.thumbnail_url }}</span></td>
+            <td class="r">
+              <a class="btn" href="{{ video.thumbnail_url }}" download>Download</a>
+              <button type="button" class="btn" data-copy-url="{{ video.thumbnail_url }}">Copy link</button>
+            </td>
+          </tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
 </div>
 {% endblock %}
 
@@ -137,6 +180,23 @@
     if (e.code === 'Space') { e.preventDefault(); if (video.paused) video.play(); else video.pause(); }
     else if (e.code === 'ArrowRight') video.currentTime = Math.min(video.duration || 0, video.currentTime + 5);
     else if (e.code === 'ArrowLeft') video.currentTime = Math.max(0, video.currentTime - 5);
+  });
+  document.querySelectorAll('[data-copy-url]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var url = btn.getAttribute('data-copy-url') || '';
+      function done() { HC.toast('success', 'Copied', 'Link copied to clipboard.'); }
+      function fail() { HC.toast('error', 'Copy failed', 'Select the link text manually.'); }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(url).then(done, fail);
+      } else {
+        var ta = document.createElement('textarea');
+        ta.value = url;
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); done(); } catch (e) { fail(); }
+        ta.remove();
+      }
+    });
   });
 })();
 </script>

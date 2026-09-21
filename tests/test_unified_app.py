@@ -144,6 +144,57 @@ class UploadHardeningTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 413)
 
 
+class PurgeTests(unittest.TestCase):
+    def setUp(self):
+        self.app = create_app(_test_config())
+        self.client = _authed_client(self.app)
+        with self.app.app_context():
+            from app.models import Video, Job, db
+            self.stuck = Video(title="stuck", status="processing")
+            db.session.add(self.stuck)
+            db.session.commit()
+            job = Job(video_id=self.stuck.id, job_type="transcode_and_upload",
+                      status="queued")
+            db.session.add(job)
+            db.session.commit()
+            self.ready = Video(title="live", status="ready")
+            db.session.add(self.ready)
+            db.session.commit()
+            self.stuck_id, self.ready_id = self.stuck.id, self.ready.id
+
+    def test_purge_stuck_video_cascades(self):
+        resp = self.client.delete(f"/api/videos/{self.stuck_id}/metadata")
+        self.assertEqual(resp.status_code, 200)
+        with self.app.app_context():
+            from app.models import Video, Job
+            self.assertIsNone(db_session_get(Video, self.stuck_id))
+            self.assertEqual(Job.query.filter_by(video_id=self.stuck_id).count(), 0)
+
+    def test_purge_ready_video_refused(self):
+        resp = self.client.delete(f"/api/videos/{self.ready_id}/metadata")
+        self.assertEqual(resp.status_code, 409)
+
+    def test_purge_missing_video_404(self):
+        resp = self.client.delete("/api/videos/does-not-exist/metadata")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_dashboard_shows_purge_and_theme_toggle(self):
+        html = self.client.get("/dashboard").data.decode()
+        self.assertIn("data-purge-video", html)
+        self.assertIn('id="themeToggle"', html)
+        self.assertIn('data-theme="dark"', html)
+
+    def test_watch_shows_downloads(self):
+        html = self.client.get(f"/watch/{self.ready_id}").data.decode()
+        self.assertIn("Download to this computer", html)
+        self.assertIn("data-copy-url", html)
+
+
+def db_session_get(model, key):
+    from app.models import db
+    return db.session.get(model, key)
+
+
 class SupervisorTests(unittest.TestCase):
     def test_claim_empty_queue_and_clean_stop(self):
         from app.worker.supervisor import JobSupervisor, claim_next_job

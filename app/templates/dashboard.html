@@ -78,8 +78,9 @@
             <button type="button" class="btn danger" data-delete-video="{{ video.id }}" data-video-title="{{ video.title }}">Delete</button>
           {% elif video.status == 'delete_pending' %}
             <span class="pill warn">delete queued</span>
+            <button type="button" class="btn danger" data-purge-video="{{ video.id }}" data-video-title="{{ video.title }}">Purge</button>
           {% else %}
-            <span class="pill dim">no actions</span>
+            <button type="button" class="btn danger" data-purge-video="{{ video.id }}" data-video-title="{{ video.title }}">Purge</button>
           {% endif %}
         </td>
       </tr>
@@ -114,6 +115,28 @@
         })
         .catch(function () {
           HC.toast('error', 'Delete failed', 'Could not reach the server.');
+          btn.disabled = false;
+        });
+    });
+  });
+  document.querySelectorAll('[data-purge-video]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var id = btn.getAttribute('data-purge-video');
+      var title = btn.getAttribute('data-video-title') || id;
+      if (!window.confirm('Purge "' + title + '" from the database?\n\nThis removes the video record, its jobs and logs. CDN files are NOT touched — use Delete for live videos.')) return;
+      btn.disabled = true;
+      fetch('/api/videos/' + encodeURIComponent(id) + '/metadata', { method: 'DELETE' })
+        .then(function (resp) { return resp.json().then(function (data) { return { resp: resp, data: data }; }); })
+        .then(function (out) {
+          if (out.resp.ok) {
+            window.location.reload();
+          } else {
+            HC.toast('error', 'Purge failed', (out.data && out.data.error) || 'Could not purge record.');
+            btn.disabled = false;
+          }
+        })
+        .catch(function () {
+          HC.toast('error', 'Purge failed', 'Could not reach the server.');
           btn.disabled = false;
         });
     });

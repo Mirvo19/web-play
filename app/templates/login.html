@@ -1,9 +1,17 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Login — HC CDN Player</title>
+  <script>
+    (function () {
+      var t = 'dark';
+      try { t = localStorage.getItem('hc-theme') || 'dark'; } catch (e) { t = 'dark'; }
+      if (t !== 'dark' && t !== 'light') t = 'dark';
+      document.documentElement.setAttribute('data-theme', t);
+    })();
+  </script>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/ops.css') }}">
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </head>

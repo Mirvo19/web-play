@@ -97,7 +97,27 @@
 
   window.HC = { el: el, poll: poll, toast: toast, formatBytes: formatBytes };
 
+  /* ---------- theme (dark default, stored choice wins) ---------- */
+  function currentTheme() {
+    var t = document.documentElement.getAttribute('data-theme');
+    return t === 'light' ? 'light' : 'dark';
+  }
+  function applyTheme(t) {
+    if (t !== 'dark' && t !== 'light') t = 'dark';
+    document.documentElement.setAttribute('data-theme', t);
+    try { localStorage.setItem('hc-theme', t); } catch (e) { /* ignore */ }
+    var btn = document.getElementById('themeToggle');
+    if (btn) btn.textContent = t === 'dark' ? 'Light mode' : 'Dark mode';
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
+    applyTheme(currentTheme());
+    var btn = document.getElementById('themeToggle');
+    if (btn) {
+      btn.addEventListener('click', function () {
+        applyTheme(currentTheme() === 'dark' ? 'light' : 'dark');
+      });
+    }
     if (document.getElementById('sessionBadge')) {
       updateSession();
       setInterval(updateSession, 5000);

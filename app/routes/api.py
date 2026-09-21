@@ -409,6 +409,66 @@ def upload_video_streamed(video_id):
 # Video management
 # ---------------------------------------------------------------------------
 
+@api_bp.route('/videos/<video_id>/metadata', methods=['DELETE'])
+@login_required
+def purge_video_metadata(video_id):
+    """Manually remove a video's metadata from the server database.
+
+    Deletes the video row plus all cascaded records (variants, file
+    entries, jobs, job logs) and any leftover job workspaces on disk.
+    Does NOT touch the CDN — so `ready` videos are refused here (use
+    DELETE /api/videos/<id>, which cleans CDN files too). Intended for
+    stuck/failed/deleted leftovers you want gone by hand.
+    """
+    video = db.session.get(Video, video_id)
+    if video is None:
+        return jsonify({'error': 'Video not found'}), 404
+    if video.status == 'ready':
+        return jsonify({
+            'error': 'Video is live on CDN. Use Delete (not purge) so CDN '
+                     'files are removed as well.'
+        }), 409
+
+    # Stop related active jobs first so the supervisor isn't mid-write.
+    stuck = (
+        Job.query.filter_by(video_id=video.id)
+        .filter(Job.status.in_(['queued', 'processing', 'receiving']))
+        .all()
+    )
+    job_ids = [j.id for j in Job.query.filter_by(video_id=video.id).all()]
+    for job in stuck:
+        try:
+            request_job_cancel(job.id)
+        except Exception as exc:
+            current_app.logger.warning("Could not cancel job %s during purge: %s", job.id, exc)
+
+    db.session.delete(video)
+    db.session.commit()
+
+    # Best-effort: remove leftover job-scoped workspaces from disk.
+    upload_folder = current_app.config.get('UPLOAD_FOLDER', '/tmp/video-processing')
+    removed_dirs = 0
+    for jid in job_ids:
+        try:
+            path = jailed_path(upload_folder, sanitized_filename(jid, default='job'))
+        except ValueError:
+            continue
+        if os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+            removed_dirs += 1
+
+    current_app.logger.warning(
+        "Metadata purged for video %s (%d jobs cancelled, %d work dirs removed)",
+        video_id, len(stuck), removed_dirs,
+    )
+    return jsonify({
+        'message': 'Video metadata purged from database',
+        'video_id': video_id,
+        'jobs_cancelled': len(stuck),
+        'work_dirs_removed': removed_dirs,
+    }), 200
+
+
 @api_bp.route('/videos/<video_id>', methods=['DELETE'])
 @login_required
 def delete_video_api(video_id):

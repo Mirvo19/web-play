@@ -1,9 +1,18 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{% block title %}HC CDN Player{% endblock %}</title>
+  <script>
+    /* Pre-paint theme: dark is the default; stored choice wins. No data involved. */
+    (function () {
+      var t = 'dark';
+      try { t = localStorage.getItem('hc-theme') || 'dark'; } catch (e) { t = 'dark'; }
+      if (t !== 'dark' && t !== 'light') t = 'dark';
+      document.documentElement.setAttribute('data-theme', t);
+    })();
+  </script>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/ops.css') }}">
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
@@ -20,6 +29,7 @@
       <a href="{{ url_for('views.settings') }}" class="{% if request.endpoint == 'views.settings' %}active{% endif %}">Settings</a>
     </nav>
     <div class="spacer"></div>
+    <button type="button" class="theme-btn" id="themeToggle" title="Switch light / dark theme">Light mode</button>
     <span class="session-badge" id="sessionBadge">session …</span>
     <a class="logout" href="{{ url_for('auth.logout') }}">Logout</a>
   </header>
