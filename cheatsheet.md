@@ -63,8 +63,11 @@ curl -s -b /tmp/hc-cookies.txt https://fuddi.me/api/settings
 ## Manually remove video metadata
 
 **Option A — UI (easiest):** Dashboard → **Purge** button on any non-ready row.
-Deletes the video record + its jobs/logs + leftover work dirs. Never touches
-the CDN. `ready` rows refuse purge — use **Delete** (removes CDN files too).
+Deletes the video record + its jobs/logs + leftover work dirs, and attempts to
+delete every tracked CDN file first (half-uploaded orphans included). The result
+toast reports exactly what left the CDN; files the current key doesn't own are
+named so you can remove them from the Hack Club dashboard. `ready` rows refuse
+purge — use **Delete** (removes CDN files too).
 
 **Option B — API:**
 

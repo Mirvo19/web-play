@@ -190,6 +190,48 @@ def execute_video_deletion(job_id: str):
     log_delete_job(job_id, "Video completely deleted.")
 
 
+def delete_tracked_files(files, provider):
+    """Best-effort CDN delete for purge flows (no job context).
+
+    Attempts every tracked file, marks successes deleted in the DB, and
+    returns a summary dict {attempted, deleted, failed, not_owned: [...],
+    auth_rejected, failed_ids: [...]}. Never raises — provider errors are
+    data, and the caller (purge) removes DB rows regardless so nothing
+    lingers locally. Aborts early on 401: further attempts cannot succeed.
+    """
+    summary = {"attempted": len(files), "deleted": 0, "failed": 0,
+               "not_owned": [], "failed_ids": [], "auth_rejected": False}
+    for f in files or []:
+        identifier = f.remote_path or f.remote_url
+        try:
+            result = provider.delete_file(identifier)
+            if isinstance(result, tuple) and len(result) == 2:
+                success, attempts = result
+            else:
+                success, attempts = bool(result), None
+        except Exception as e:
+            success, attempts = False, [{"error": str(e)[:300]}]
+        if success:
+            f.upload_status = "deleted"
+            f.deleted_at = datetime.now(timezone.utc)
+            summary["deleted"] += 1
+        else:
+            summary["failed"] += 1
+            summary["failed_ids"].append(identifier)
+            if _attempts_show_auth_rejection(attempts):
+                summary["auth_rejected"] = True
+                _logger.error("Purge CDN cleanup aborted: key rejected (401).")
+                break
+            if _attempts_show_not_owned(attempts):
+                summary["not_owned"].append(identifier)
+    try:
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        _logger.error("Could not persist purge CDN marks: %s", e)
+    return summary
+
+
 def _attempts_show_not_owned(attempts) -> bool:
     """True when the documented delete endpoint answered 404.
 

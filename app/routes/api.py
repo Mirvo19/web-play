@@ -413,13 +413,16 @@ def upload_video_streamed(video_id):
 @api_bp.route('/videos/<video_id>/metadata', methods=['DELETE'])
 @login_required
 def purge_video_metadata(video_id):
-    """Manually remove a video's metadata from the server database.
+    """Manually remove a video and everything attached to it.
 
-    Deletes the video row plus all cascaded records (variants, file
-    entries, jobs, job logs) and any leftover job workspaces on disk.
-    Does NOT touch the CDN — so `ready` videos are refused here (use
-    DELETE /api/videos/<id>, which cleans CDN files too). Intended for
-    stuck/failed/deleted leftovers you want gone by hand.
+    Attempts CDN deletion of every tracked uploaded file first (so
+    half-uploaded orphans like a 720p variant + thumbnail from a failed job
+    don't linger on quota), then deletes the video row plus all cascaded
+    records (variants, file entries, jobs, job logs) and leftover job
+    workspaces on disk. DB rows are removed regardless of CDN outcome —
+    the response reports exactly what left the CDN and what remains.
+    `ready` videos are still refused here (use DELETE /api/videos/<id>,
+    which cleans CDN files with job/log visibility).
     """
     video = db.session.get(Video, video_id)
     if video is None:
@@ -443,6 +446,25 @@ def purge_video_metadata(video_id):
         except Exception as exc:
             current_app.logger.warning("Could not cancel job %s during purge: %s", job.id, exc)
 
+    # Best-effort CDN cleanup BEFORE rows disappear (identifiers live there).
+    from app.worker.deleter import delete_tracked_files
+
+    tracked = VideoFile.query.filter_by(video_id=video.id, upload_status='uploaded').all()
+    cdn = {"attempted": 0, "deleted": 0, "failed": 0,
+           "not_owned": [], "failed_ids": [], "auth_rejected": False,
+           "skipped": None}
+    if not tracked:
+        cdn["skipped"] = "no uploaded CDN files tracked"
+    else:
+        cdn_account = db.session.get(CDNAccount, video.cdn_account_id) if video.cdn_account_id else None
+        if cdn_account is None:
+            cdn["skipped"] = "no CDN account linked to video"
+            cdn["attempted"] = len(tracked)
+            cdn["failed"] = len(tracked)
+            cdn["failed_ids"] = [f.remote_path or f.remote_url for f in tracked]
+        else:
+            cdn = delete_tracked_files(tracked, CDNManager.get_provider_instance(cdn_account))
+
     db.session.delete(video)
     db.session.commit()
 
@@ -459,14 +481,29 @@ def purge_video_metadata(video_id):
             removed_dirs += 1
 
     current_app.logger.warning(
-        "Metadata purged for video %s (%d jobs cancelled, %d work dirs removed)",
-        video_id, len(stuck), removed_dirs,
+        "Metadata purged for video %s (%d jobs cancelled, %d work dirs removed, "
+        "CDN: %d/%d deleted)",
+        video_id, len(stuck), removed_dirs, cdn["deleted"], cdn["attempted"],
     )
+    if cdn["failed"]:
+        message = (f"Video purged locally; CDN cleanup partial: "
+                   f"{cdn['deleted']}/{cdn['attempted']} files deleted.")
+        if cdn["auth_rejected"]:
+            message += " Key was rejected — remaining files are still on the CDN."
+        elif cdn["not_owned"]:
+            message += f" {len(cdn['not_owned'])} file(s) not owned by this key — remove them from the Hack Club dashboard."
+    elif cdn["attempted"]:
+        message = f"Video purged; all {cdn['deleted']} tracked CDN files deleted."
+    else:
+        message = "Video metadata purged from database"
+        if cdn["skipped"]:
+            message += f" ({cdn['skipped']})"
     return jsonify({
-        'message': 'Video metadata purged from database',
+        'message': message,
         'video_id': video_id,
         'jobs_cancelled': len(stuck),
         'work_dirs_removed': removed_dirs,
+        'cdn': cdn,
     }), 200
 
 

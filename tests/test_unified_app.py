@@ -170,6 +170,81 @@ class PurgeTests(unittest.TestCase):
             self.assertIsNone(db_session_get(Video, self.stuck_id))
             self.assertEqual(Job.query.filter_by(video_id=self.stuck_id).count(), 0)
 
+    def test_purge_deletes_orphaned_cdn_files(self):
+        from app.cdn.manager import CDNManager
+        from app.models import Video, VideoFile, CDNAccount, db
+
+        deleted_remote = []
+
+        class SweepProvider:
+            def delete_file(self, ident):
+                deleted_remote.append(ident)
+                return True, [{"endpoint": "x", "status": 200, "body": '{"deleted": true}'}]
+
+        with self.app.app_context():
+            acc = CDNAccount.query.first()
+            video = Video(title="half", status="failed", cdn_account_id=acc.id)
+            db.session.add(video)
+            db.session.commit()
+            for i in range(2):
+                db.session.add(VideoFile(
+                    video_id=video.id, cdn_account_id=acc.id,
+                    remote_path=f"orphan-{i}", remote_url=f"http://x/{i}",
+                    file_size=10, file_type="segment", upload_status="uploaded"))
+            db.session.commit()
+            vid = video.id
+
+        orig = CDNManager.get_provider_instance
+        CDNManager.get_provider_instance = classmethod(lambda cls, acc: SweepProvider())
+        try:
+            resp = self.client.delete(f"/api/videos/{vid}/metadata")
+        finally:
+            CDNManager.get_provider_instance = orig
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertEqual(body["cdn"]["deleted"], 2)
+        self.assertEqual(body["cdn"]["failed"], 0)
+        self.assertEqual(sorted(deleted_remote), ["orphan-0", "orphan-1"])
+        with self.app.app_context():
+            from app.models import Video
+            self.assertIsNone(db_session_get(Video, vid))
+
+    def test_purge_reports_unowned_leftovers_but_still_purges(self):
+        from app.cdn.manager import CDNManager
+        from app.models import Video, VideoFile, CDNAccount, db
+
+        class ForeignProvider:
+            def delete_file(self, ident):
+                return False, [{"endpoint": "https://cdn.hackclub.com/api/v4/upload/x",
+                                "status": 404, "body": "no matching resource"}]
+
+        with self.app.app_context():
+            acc = CDNAccount.query.first()
+            video = Video(title="half2", status="failed", cdn_account_id=acc.id)
+            db.session.add(video)
+            db.session.commit()
+            db.session.add(VideoFile(
+                video_id=video.id, cdn_account_id=acc.id,
+                remote_path="orphan-x", remote_url="http://x/x",
+                file_size=10, file_type="segment", upload_status="uploaded"))
+            db.session.commit()
+            vid = video.id
+
+        orig = CDNManager.get_provider_instance
+        CDNManager.get_provider_instance = classmethod(lambda cls, acc: ForeignProvider())
+        try:
+            resp = self.client.delete(f"/api/videos/{vid}/metadata")
+        finally:
+            CDNManager.get_provider_instance = orig
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertEqual(body["cdn"]["deleted"], 0)
+        self.assertEqual(body["cdn"]["failed"], 1)
+        self.assertEqual(body["cdn"]["not_owned"], ["orphan-x"])
+        with self.app.app_context():
+            from app.models import Video
+            self.assertIsNone(db_session_get(Video, vid))
+
     def test_purge_ready_video_refused(self):
         resp = self.client.delete(f"/api/videos/{self.ready_id}/metadata")
         self.assertEqual(resp.status_code, 409)

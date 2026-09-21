@@ -133,13 +133,18 @@
     btn.addEventListener('click', function () {
       var id = btn.getAttribute('data-purge-video');
       var title = btn.getAttribute('data-video-title') || id;
-      if (!window.confirm('Purge "' + title + '" from the database?\n\nThis removes the video record, its jobs and logs. CDN files are NOT touched — use Delete for live videos.')) return;
+      if (!window.confirm('Purge "' + title + '" completely?\n\nRemoves the video record, its jobs/logs, AND attempts to delete its CDN files so nothing lingers on quota. Use Delete for live videos.')) return;
       btn.disabled = true;
       fetch('/api/videos/' + encodeURIComponent(id) + '/metadata', { method: 'DELETE' })
         .then(function (resp) { return resp.json().then(function (data) { return { resp: resp, data: data }; }); })
         .then(function (out) {
           if (out.resp.ok) {
-            window.location.reload();
+            var cdn = (out.data && out.data.cdn) || {};
+            HC.toast('success', 'Purged', (out.data && out.data.message) || 'Record removed.');
+            if ((cdn.failed || 0) > 0) {
+              HC.toast('warn', 'CDN leftovers remain', (cdn.not_owned && cdn.not_owned.length ? 'Some files are not owned by this key — remove them from the Hack Club dashboard.' : 'Some CDN files could not be deleted — see job history.'));
+            }
+            setTimeout(function () { window.location.reload(); }, 1600);
           } else {
             HC.toast('error', 'Purge failed', (out.data && out.data.error) || 'Could not purge record.');
             btn.disabled = false;
