@@ -596,8 +596,10 @@ def test_cdn_account(account_id):
     if account is None:
         return jsonify({'error': 'CDN account not found'}), 404
     success, msg = CDNManager.test_account(account)
-    # Real provider result — success reflects the actual API response.
-    return jsonify({'success': success, 'message': msg}), 200 if success else 502
+    # Always 200: this is a diagnostic RESULT, not a gateway error. A failed
+    # test surfaces via success:false so browsers never mislabel it as
+    # "Bad Gateway" (an actual dead upstream keeps its 5xx).
+    return jsonify({'success': success, 'message': msg}), 200
 
 
 @api_bp.route('/cdn-accounts/<account_id>/refresh-storage', methods=['POST'])
@@ -611,7 +613,7 @@ def refresh_cdn_storage(account_id):
         account.refresh_storage_snapshot()
     except Exception as e:
         current_app.logger.warning("CDN storage refresh failed for %s: %s", account_id, e)
-        return jsonify({'success': False, 'message': str(e)[:500]}), 502
+        return jsonify({'success': False, 'message': str(e)[:500]}), 200
     return jsonify({'success': True, 'storage': account.get_latest_storage()})
 
 
@@ -720,8 +722,9 @@ def sync_cdn_accounts():
         return jsonify({'error': 'Supabase mirror not configured'}), 503
     accounts = CDNAccount.query.all()
     stats = supabase_store.sync_local_to_remote(accounts)
-    status = 200 if stats['failed'] == 0 else 502
-    return jsonify({'success': stats['failed'] == 0, 'sync': stats}), status
+    # Always 200 with a success flag (see test endpoint rationale above);
+    # 503 is reserved for "mirror not configured at all".
+    return jsonify({'success': stats['failed'] == 0, 'sync': stats}), 200
 
 
 @api_bp.route('/cdn-accounts/<account_id>', methods=['DELETE'])

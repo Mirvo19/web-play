@@ -138,8 +138,8 @@
       fetch('/api/cdn-accounts/' + encodeURIComponent(id) + '/refresh-storage', { method: 'POST' })
         .then(function (resp) { return resp.json().then(function (data) { return { ok: resp.ok, data: data }; }); })
         .then(function (out) {
-          if (out.ok) window.location.reload();
-          else HC.toast('error', 'Refresh failed', out.data.message || 'CDN did not answer.');
+          if (out.ok && out.data.success) window.location.reload();
+          else HC.toast('error', 'Refresh failed', (out.data && out.data.message) || 'CDN did not answer.');
         })
         .catch(function () { HC.toast('error', 'Refresh failed', 'Request failed.'); })
         .finally(function () { btn.disabled = false; });
@@ -218,11 +218,11 @@
       fetch('/api/cdn-accounts/sync', { method: 'POST' })
         .then(function (resp) { return resp.json().then(function (data) { return { ok: resp.ok, data: data }; }); })
         .then(function (out) {
-          if (out.ok) {
-            var s = (out.data && out.data.sync) || {};
+          var s = (out.data && out.data.sync) || {};
+          if (out.ok && out.data.success) {
             HC.toast('success', 'Mirror sync', 'Pushed ' + (s.pushed || 0) + ', failed ' + (s.failed || 0) + '.');
           } else {
-            HC.toast('error', 'Sync failed', (out.data && (out.data.error || (out.data.sync && out.data.sync.errors || []).join(' '))) || 'Mirror unreachable.');
+            HC.toast('error', 'Sync failed', (out.data && (out.data.error || (s.errors || []).join(' '))) || 'Mirror unreachable.');
           }
         })
         .catch(function () { HC.toast('error', 'Sync failed', 'Request failed.'); })

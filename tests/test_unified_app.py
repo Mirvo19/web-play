@@ -325,6 +325,19 @@ class MirrorTests(unittest.TestCase):
         self.assertNotIn("sk_test", str(sent))
         self.assertTrue(sent["encrypted_credentials"])
 
+    def test_diagnostics_never_wear_gateway_status(self):
+        """Failed CDN diagnostics must return 200 + success:false, never 502
+        (browsers mislabel 502 as 'Bad Gateway', hiding the real message)."""
+        with self.app.app_context():
+            from app.models import CDNAccount
+            acc_id = CDNAccount.query.first().id
+        resp = self.client.post(f"/api/cdn-accounts/{acc_id}/test")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("success", resp.get_json())
+        resp = self.client.post(f"/api/cdn-accounts/{acc_id}/refresh-storage")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("success", resp.get_json())
+
     def test_reveal_returns_plaintext_once(self):
         with self.app.app_context():
             from app.models import CDNAccount
