@@ -176,6 +176,62 @@ class FakePopen:
         return 0
 
 
+class EngineLogTests(unittest.TestCase):
+    def test_download_stderr_persisted_to_log_file(self):
+        base = tempfile.mkdtemp()
+        q = eng.quarantine_for(base, "log1")
+        target = os.path.join(q, "Show.S01", "ep01.mkv")
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "wb") as f:
+            f.write(b"m" * 1500)
+        meta = bencode.parse_torrent_info(sample_multi_torrent())
+        log_path = os.path.join(base, "t.log")
+
+        fake = FakePopen()
+        fake.stderr = ["[#1 0B/0B] peer=3\n", "[#1 0B/0B] seeder=0\n"]
+        with patch.object(eng, "find_aria2", return_value="aria2c"), \
+             patch.object(eng, "_spawn", return_value=fake):
+            eng.run_download(meta, [1], q, "magnet:?xt=urn:btih:abc",
+                             {"max_peers": 5}, timeout_sec=60, log_path=log_path)
+        with open(log_path) as f:
+            content = f.read()
+        self.assertIn("peer=3", content)
+        self.assertIn("seeder=0", content)
+        eng.wipe_quarantine(q)
+        # Log lives OUTSIDE quarantine: wipe must not remove it.
+        self.assertTrue(os.path.isfile(log_path))
+
+    def test_log_capped(self):
+        base = tempfile.mkdtemp()
+        log_path = os.path.join(base, "big.log")
+        fh = eng._open_log(log_path)
+        try:
+            for _ in range(2000):
+                eng._write_log(fh, "x" * 500 + "\n")
+        finally:
+            eng._close_log(fh)
+        self.assertLessEqual(os.path.getsize(log_path), eng.ENGINE_LOG_MAX_BYTES + 1024)
+
+    def test_magnet_metadata_failure_keeps_log(self):
+        base = tempfile.mkdtemp()
+        q = eng.quarantine_for(base, "log2")
+        log_path = os.path.join(base, "m.log")
+
+        class FailPopen(FakePopen):
+            def wait(self, timeout=None):
+                self.returncode = 1
+                return 1
+
+        fake = FailPopen()
+        fake.stderr = ["error: timeout\n"]
+        with patch.object(eng, "find_aria2", return_value="aria2c"), \
+             patch.object(eng, "_spawn", return_value=fake):
+            with self.assertRaises(eng.TorrentError):
+                eng._fetch_magnet_metadata("magnet:?xt=urn:btih:abc", q, 30, log_path)
+        with open(log_path) as f:
+            self.assertIn("timeout", f.read())
+
+
 class DownloadLoopTests(unittest.TestCase):
     def test_success_path_reports_progress_and_returns_files(self):
         base = tempfile.mkdtemp()

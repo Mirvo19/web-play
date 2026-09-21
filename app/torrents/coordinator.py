@@ -43,6 +43,35 @@ def quarantine_base(app) -> str:
     return base
 
 
+def engine_log_path(app, torrent_id: str) -> str:
+    """Per-torrent aria2 log file. Lives NEXT TO quarantines (never inside),
+    so wipes, crash recovery, and purges never delete diagnostic history."""
+    logs_dir = os.path.join(quarantine_base(app), "engine-logs")
+    os.makedirs(logs_dir, mode=0o700, exist_ok=True)
+    safe_id = "".join(c for c in (torrent_id or "") if c.isalnum() or c in ("-", "_"))[:64]
+    return os.path.join(logs_dir, (safe_id or "unknown") + ".log")
+
+
+def prune_engine_logs(app, max_age_days: int = 7) -> None:
+    """Best-effort removal of engine logs older than max_age_days."""
+    try:
+        logs_dir = os.path.join(quarantine_base(app), "engine-logs")
+        if not os.path.isdir(logs_dir):
+            return
+        cutoff = time.time() - max(1, max_age_days) * 86400
+        for entry in os.listdir(logs_dir):
+            if not entry.endswith(".log"):
+                continue
+            path = os.path.join(logs_dir, entry)
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+            except OSError:
+                pass
+    except Exception as e:
+        _log.warning("Could not prune engine logs: %s", e)
+
+
 def _tsetting(app, key: str, default: int, low: int, high: int) -> int:
     from app.models import Setting
 
@@ -88,6 +117,7 @@ class TorrentCoordinator:
             self._thread.start()
         _log.info("Recovering interrupted torrent jobs...")
         self._recover()
+        prune_engine_logs(self._app)
         _log.info("Torrent coordinator started.")
         return self
 
@@ -215,8 +245,9 @@ class TorrentCoordinator:
                 base = quarantine_base(self._app)
                 work_dir = _eng.quarantine_for(base, row.quarantine_token)
                 timeout = _tsetting(self._app, "torrent_metadata_timeout_sec", 120, 15, 600)
+                log_path = engine_log_path(self._app, tid)
                 if row.source_kind == "magnet":
-                    meta = _eng.fetch_metadata("magnet", row.source_ref, work_dir, timeout)
+                    meta = _eng.fetch_metadata("magnet", row.source_ref, work_dir, timeout, log_path)
                 else:
                     meta = _eng.fetch_metadata(
                         "file", os.path.join(work_dir, "source.torrent"), work_dir, timeout)
@@ -278,7 +309,8 @@ class TorrentCoordinator:
 
                 landed = _eng.run_download(meta, indices, work_dir, source, limits,
                                            progress_cb=_progress,
-                                           cancel_event=ev, timeout_sec=timeout)
+                                           cancel_event=ev, timeout_sec=timeout,
+                                           log_path=engine_log_path(self._app, tid))
                 row = db.session.get(TorrentJob, tid)
                 row.state = "validating"
                 db.session.commit()

@@ -38,6 +38,9 @@ _log = logging.getLogger(__name__)
 
 TORRENT_FILE_MAX_BYTES = 5 * 1024 * 1024
 
+#: Cap per-torrent engine log files (aria2 stderr, outside quarantine).
+ENGINE_LOG_MAX_BYTES = 512 * 1024
+
 
 class TorrentError(RuntimeError):
     pass
@@ -117,7 +120,8 @@ def _safe_join(base: str, *parts: str) -> str:
 # Metadata (no payload downloaded)
 # ---------------------------------------------------------------------------
 
-def fetch_metadata(kind: str, source: str, work_dir: str, timeout_sec: int) -> dict:
+def fetch_metadata(kind: str, source: str, work_dir: str, timeout_sec: int,
+                   log_path: str = None) -> dict:
     """Fetch torrent metadata only. Returns {name, total_size, files}.
 
     kind 'magnet': source is the magnet URI (downloaded via
@@ -129,7 +133,7 @@ def fetch_metadata(kind: str, source: str, work_dir: str, timeout_sec: int) -> d
     if kind == "magnet":
         if not source or not source.strip().lower().startswith("magnet:?"):
             raise TorrentError("not a magnet link (must start with 'magnet:?')")
-        torrent_path = _fetch_magnet_metadata(source.strip(), work_dir, timeout_sec)
+        torrent_path = _fetch_magnet_metadata(source.strip(), work_dir, timeout_sec, log_path)
         with open(torrent_path, "rb") as f:
             raw = f.read(TORRENT_FILE_MAX_BYTES + 1)
     elif kind == "file":
@@ -150,7 +154,8 @@ def fetch_metadata(kind: str, source: str, work_dir: str, timeout_sec: int) -> d
         raise TorrentError(f"invalid torrent metadata: {e}")
 
 
-def _fetch_magnet_metadata(magnet: str, work_dir: str, timeout_sec: int) -> str:
+def _fetch_magnet_metadata(magnet: str, work_dir: str, timeout_sec: int,
+                           log_path: str = None) -> str:
     aria2 = find_aria2()
     if not aria2:
         raise TorrentError("torrent engine unavailable (aria2c not installed)")
@@ -166,14 +171,36 @@ def _fetch_magnet_metadata(magnet: str, work_dir: str, timeout_sec: int) -> str:
         "--connect-timeout=30",
         "--summary-interval=0",
         "--show-console-readout=false",
-        "--console-log-level=warn",
+        "--console-log-level=notice",
         "--auto-file-renaming=false",
         magnet,
     ]
     proc = _spawn(argv, work_dir)
-    rc = _wait_bounded(proc, timeout_sec + 15, None)
+    # Drain stderr to the engine log (bounded) so a chatty fetch can neither
+    # deadlock the pipe nor vanish without a trace for diagnosis.
+    fh = _open_log(log_path)
+    stderr_tail: deque = deque(maxlen=20)
+
+    def _drain():
+        try:
+            for line in proc.stderr:
+                stderr_tail.append(line.strip())
+                _write_log(fh, line)
+        except Exception:
+            pass
+        finally:
+            _close_log(fh)
+
+    drain_thread = threading.Thread(target=_drain, daemon=True)
+    drain_thread.start()
+    try:
+        rc = _wait_bounded(proc, timeout_sec + 15, None)
+    finally:
+        drain_thread.join(timeout=5)
     if rc != 0:
-        raise TorrentError("could not fetch torrent metadata (magnet unreachable or timed out)")
+        tail = " | ".join(stderr_tail)[:500]
+        raise TorrentError(
+            f"could not fetch torrent metadata (magnet unreachable or timed out): {tail}")
     after = [p for p in glob.glob(os.path.join(work_dir, "*.torrent")) if p not in before]
     if not after:
         # Fall back to newest .torrent in case clocks/sets disagree.
@@ -205,7 +232,7 @@ def expected_locations(meta: dict, indices, work_dir: str) -> dict:
 def run_download(meta: dict, indices, work_dir: str, source: str, limits: dict,
                  progress_cb: Optional[Callable] = None,
                  cancel_event: Optional[threading.Event] = None,
-                 timeout_sec: int = 3600) -> list:
+                 timeout_sec: int = 3600, log_path: str = None) -> list:
     """Download ONLY the selected indexes. Returns [(index, path)].
 
     limits: {max_peers, bandwidth_kbps (0=uncapped), aria_timeout}.
@@ -241,7 +268,7 @@ def run_download(meta: dict, indices, work_dir: str, source: str, limits: dict,
         "--check-integrity=true",
         "--summary-interval=0",
         "--show-console-readout=false",
-        "--console-log-level=warn",
+        "--console-log-level=notice",
         source,
     ]
     if bw > 0:
@@ -249,14 +276,18 @@ def run_download(meta: dict, indices, work_dir: str, source: str, limits: dict,
 
     deadline = time.time() + max(30, int(timeout_sec))
     proc = _spawn(argv, work_dir)
-    stderr_tail: deque = deque(maxlen=20)
+    stderr_tail: deque = deque(maxlen=200)
+    fh = _open_log(log_path)
 
     def _drain():
         try:
             for line in proc.stderr:
                 stderr_tail.append(line.strip())
+                _write_log(fh, line)
         except Exception:
             pass
+        finally:
+            _close_log(fh)
 
     drain_thread = threading.Thread(target=_drain, daemon=True)
     drain_thread.start()
@@ -313,6 +344,43 @@ def _sample_sizes(locations: dict) -> dict:
         except OSError:
             out[idx] = 0
     return out
+
+
+# ---------------------------------------------------------------------------
+# Engine log sink (per-torrent aria2 stderr, outside the wiped quarantine)
+# ---------------------------------------------------------------------------
+
+def _open_log(path: str):
+    if not path:
+        return None
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        return open(path, "a", encoding="utf-8", errors="replace")
+    except OSError as e:
+        _log.warning("Cannot open engine log %s: %s", path, e)
+        return None
+
+
+def _write_log(fh, line: str) -> None:
+    if fh is None:
+        return
+    try:
+        if fh.tell() > ENGINE_LOG_MAX_BYTES:
+            return
+        fh.write(line if line.endswith("\n") else line + "\n")
+    except (OSError, ValueError):
+        pass
+
+
+def _close_log(fh) -> None:
+    if fh is None:
+        return
+    try:
+        fh.flush()
+        os.fsync(fh.fileno())
+        fh.close()
+    except (OSError, ValueError):
+        pass
 
 
 # ---------------------------------------------------------------------------

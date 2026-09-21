@@ -175,6 +175,37 @@ def select_files(torrent_id):
     return jsonify({"message": "Download started", "torrent": row.to_dict()}), 200
 
 
+@torrents_bp.route("/<torrent_id>/engine-log", methods=["GET"])
+@login_required
+def engine_log(torrent_id):
+    """Tail of the aria2 engine log for one torrent (diagnosing stalls)."""
+    row = db.session.get(TorrentJob, torrent_id)
+    if row is None:
+        return jsonify({"error": "Torrent not found"}), 404
+    try:
+        num_lines = min(max(int(request.args.get("lines", "150")), 10), 500)
+    except (TypeError, ValueError):
+        num_lines = 150
+    from app.torrents.coordinator import engine_log_path
+
+    path = engine_log_path(current_app, torrent_id)
+    if not os.path.isfile(path):
+        return jsonify({"error": "No engine log yet — nothing has run for this torrent."}), 404
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except OSError as e:
+        return jsonify({"error": f"Could not read engine log: {e}"}), 500
+    lines = content.splitlines()
+    tail = lines[-num_lines:]
+    return jsonify({
+        "torrent_id": torrent_id,
+        "lines": tail,
+        "total_lines": len(lines),
+        "truncated": len(lines) > num_lines,
+    }), 200
+
+
 @torrents_bp.route("/<torrent_id>/cancel", methods=["POST"])
 @login_required
 def cancel_torrent(torrent_id):

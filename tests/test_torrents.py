@@ -381,5 +381,39 @@ class TorrentsPageTests(unittest.TestCase):
         self.assertIn("torrentMaxTotalMb", settings)
 
 
+class EngineLogEndpointTests(unittest.TestCase):
+    def test_tail_and_missing_cases(self):
+        from app.models import TorrentJob, db
+        from app.torrents.coordinator import engine_log_path
+
+        app = create_app(_test_config())
+        client = _authed_client(app)
+        with app.app_context():
+            row = TorrentJob(source_kind="magnet", source_ref="magnet:?x",
+                             quarantine_token="log1", state="downloading")
+            db.session.add(row)
+            db.session.commit()
+            tid = row.id
+            path = engine_log_path(app, tid)
+            with open(path, "w") as f:
+                f.write("\n".join(f"line{i}" for i in range(20)) + "\n")
+
+        resp = client.get(f"/api/torrents/{tid}/engine-log?lines=3")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        # lines=3 is below the 10-line floor -> last 10 of 20
+        self.assertEqual(body["lines"], [f"line{i}" for i in range(10, 20)])
+        self.assertTrue(body["truncated"])
+        self.assertEqual(body["total_lines"], 20)
+
+        resp = client.get("/api/torrents/nope/engine-log")
+        self.assertEqual(resp.status_code, 404)
+
+        with app.app_context():
+            os.remove(path)
+        resp = client.get(f"/api/torrents/{tid}/engine-log")
+        self.assertEqual(resp.status_code, 404)
+
+
 if __name__ == "__main__":
     unittest.main()

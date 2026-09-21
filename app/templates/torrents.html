@@ -57,6 +57,7 @@
   var torrentFile = document.getElementById('torrentFile');
   var torrentDropLabel = document.getElementById('torrentDropLabel');
   var knownIds = {};
+  var openLogs = {};
   var ACTIVE = ['fetching_metadata', 'awaiting_selection', 'downloading', 'validating'];
 
   function pillClass(state) {
@@ -114,6 +115,34 @@
       frag.appendChild(opt);
     });
     return frag;
+  }
+
+  function engineLogSection(id) {
+    var wrap = HC.el('div');
+    wrap.style.marginTop = '8px';
+    var btn = HC.el('button', { type: 'button', className: 'btn', 'data-t-log': id }, 'Engine log');
+    wrap.appendChild(btn);
+    var box = HC.el('pre', { className: 'logbox', 'data-t-logbox': id });
+    box.style.display = 'none';
+    box.style.maxHeight = '220px';
+    box.style.marginTop = '6px';
+    wrap.appendChild(box);
+    return wrap;
+  }
+
+  function fetchLogTail(id, box, silent) {
+    fetch('/api/torrents/' + encodeURIComponent(id) + '/engine-log?lines=150').then(function (resp) {
+      if (!resp.ok) return null;
+      return resp.json();
+    }).then(function (data) {
+      if (!data || !box.isConnected) return;
+      if (data.lines) {
+        box.textContent = data.lines.join('\n') + (data.truncated ? '\n…(truncated, showing last 150)' : '');
+        box.scrollTop = box.scrollHeight;
+      }
+    }).catch(function () {
+      if (!silent && box.isConnected) box.textContent = 'Could not load engine log.';
+    });
   }
 
   function selectedTotal(t, checked) {
@@ -219,6 +248,7 @@
         row.appendChild(fbar);
         body.appendChild(row);
       });
+      body.appendChild(engineLogSection(t.id));
     } else if (t.state === 'handed_off') {
       var ok = HC.el('div', { className: 'alert' });
       ok.style.borderColor = 'var(--ok)';
@@ -237,6 +267,7 @@
       var bad = HC.el('div', { className: 'alert bad' });
       bad.textContent = t.error_message || 'Failed.';
       body.appendChild(bad);
+      body.appendChild(engineLogSection(t.id));
     } else if (t.state === 'cancelled') {
       body.appendChild(HC.el('div', { className: 'empty' }, 'Cancelled — quarantine wiped.'));
     }
@@ -280,6 +311,14 @@
         } else {
           listBox.appendChild(fresh);
           if (window.HC) window.HC.enter(fresh);
+        }
+        /* Keep an open engine-log tail live across re-renders. */
+        if (openLogs[t.id]) {
+          var logBox = fresh.querySelector('[data-t-logbox]');
+          if (logBox) {
+            logBox.style.display = '';
+            fetchLogTail(t.id, logBox, true);
+          }
         }
       });
       /* Live-update the selected-total readout without disturbing checkboxes. */
@@ -351,6 +390,24 @@
         HC.toast('error', 'Download refused', 'Network error.');
         start.disabled = false;
       });
+      return;
+    }
+    var logBtn = e.target.closest ? e.target.closest('[data-t-log]') : null;
+    if (logBtn) {
+      var lid = logBtn.getAttribute('data-t-log');
+      var card = logBtn.closest('[data-t-card]');
+      var box = card ? card.querySelector('[data-t-logbox]') : null;
+      if (!box) return;
+      if (openLogs[lid]) {
+        delete openLogs[lid];
+        box.textContent = '';
+        box.style.display = 'none';
+      } else {
+        openLogs[lid] = true;
+        box.style.display = '';
+        box.textContent = 'Loading engine log…';
+        fetchLogTail(lid, box, false);
+      }
       return;
     }
     var cancel = e.target.closest ? e.target.closest('[data-t-cancel]') : null;
