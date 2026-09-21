@@ -1,4 +1,5 @@
 import time
+import uuid
 import jwt
 import requests
 from functools import wraps
@@ -8,9 +9,21 @@ from flask import Blueprint, request, jsonify, redirect, url_for, make_response,
 
 auth_bp = Blueprint('auth', __name__)
 
+_LOOPBACK_ADDRS = {'127.0.0.1', '::1', 'localhost'}
+
+
+def _jwt_secret() -> str:
+    secret = current_app.config.get('JWT_SECRET_KEY', '')
+    if not secret:
+        raise RuntimeError(
+            "JWT_SECRET_KEY is not configured. Set a strong random value and restart."
+        )
+    return secret
+
+
 def generate_session_jwt(user_id: str, email: str) -> Tuple[str, int]:
     """Generate a 24-hour JWT session token and return (token, exp_timestamp)."""
-    secret = current_app.config.get('JWT_SECRET_KEY', 'default-jwt-secret-key')
+    secret = _jwt_secret()
     now = datetime.now(timezone.utc)
     exp = now + timedelta(hours=24)
     exp_timestamp = int(exp.timestamp())
@@ -33,7 +46,10 @@ def verify_session_jwt(token: str) -> Optional[dict]:
     # Strip Bearer prefix if present
     if token.startswith("Bearer "):
         token = token[7:]
-    secret = current_app.config.get('JWT_SECRET_KEY', 'default-jwt-secret-key')
+    try:
+        secret = _jwt_secret()
+    except RuntimeError:
+        return None
     try:
         payload = jwt.decode(token, secret, algorithms=['HS256'])
         return payload
@@ -63,13 +79,42 @@ def login_required(f):
     return decorated_function
 
 
+def supabase_configured() -> bool:
+    """True only when a real (non-placeholder) Supabase project is configured."""
+    url = (current_app.config.get('SUPABASE_URL', '') or '').strip().rstrip('/')
+    key = (current_app.config.get('SUPABASE_ANON_KEY', '') or '').strip()
+    if not url or not key:
+        return False
+    placeholders = ('your-project-ref', 'your-supabase', 'example', 'changeme', 'placeholder')
+    if any(p in url.lower() for p in placeholders):
+        return False
+    return True
+
+
+def insecure_dev_auth_enabled() -> bool:
+    return bool(current_app.config.get('ALLOW_INSECURE_DEV_AUTH', False))
+
+
+def auth_mode() -> str:
+    """'supabase' when real auth is configured, else 'insecure-dev' or 'disabled'."""
+    if supabase_configured():
+        return 'supabase'
+    if insecure_dev_auth_enabled():
+        return 'insecure-dev'
+    return 'disabled'
+
+
+def _is_loopback_request() -> bool:
+    return (request.remote_addr or '') in _LOOPBACK_ADDRS
+
+
 @auth_bp.route('/login', methods=['GET', 'POST'])
 def login_page():
     if request.method == 'GET':
         user = get_current_user()
         if user:
             return redirect(url_for('views.dashboard'))
-        return render_template('login.html')
+        return render_template('login.html', auth_mode=auth_mode())
 
     # Handle POST login
     data = request.get_json() if request.is_json else request.form
@@ -79,14 +124,9 @@ def login_page():
     if not email or not password:
         return jsonify({'error': 'Email and password are required'}), 400
 
-    supabase_url = current_app.config.get('SUPABASE_URL', '').rstrip('/')
-    supabase_key = current_app.config.get('SUPABASE_ANON_KEY', '')
-
-    user_id = None
-    authenticated = False
-
-    # 1. Try Supabase Auth API login
-    if supabase_url and supabase_key and "your-project-ref" not in supabase_url:
+    if supabase_configured():
+        supabase_url = current_app.config.get('SUPABASE_URL', '').rstrip('/')
+        supabase_key = current_app.config.get('SUPABASE_ANON_KEY', '')
         try:
             auth_endpoint = f"{supabase_url}/auth/v1/token?grant_type=password"
             headers = {
@@ -100,23 +140,45 @@ def login_page():
                 resp_data = resp.json()
                 user_info = resp_data.get('user', {})
                 user_id = user_info.get('id', email)
-                authenticated = True
             else:
-                err_msg = resp.json().get('error_description') or resp.json().get('msg') or 'Invalid Supabase credentials'
+                try:
+                    err_body = resp.json()
+                except Exception:
+                    err_body = {}
+                err_msg = (err_body.get('error_description')
+                           or err_body.get('msg')
+                           or 'Invalid credentials')
                 return jsonify({'error': err_msg}), 401
-        except Exception as e:
-            return jsonify({'error': f'Supabase Auth service error: {str(e)}'}), 500
+        except requests.RequestException as e:
+            return jsonify({'error': f'Supabase Auth service error: {str(e)}'}), 502
 
-    # 2. Fallback test credentials if Supabase URL is not configured yet
-    if not authenticated:
-        if email and len(password) >= 6:
-            user_id = f"user_{hash(email)}"
-            authenticated = True
-        else:
+        authenticated_user_id = user_id
+    elif insecure_dev_auth_enabled() and _is_loopback_request():
+        # FAIL-CLOSED fallback: only when the operator explicitly opted in
+        # AND the request comes from loopback. Bla — non-loopback clients
+        # always get 503 (see below), even with the flag on.
+        if len(password) < 6:
             return jsonify({'error': 'Invalid credentials'}), 401
+        current_app.logger.warning(
+            "Insecure dev-mode login used for %s from %s — enable real Supabase auth.",
+            email, request.remote_addr,
+        )
+        authenticated_user_id = f"dev_{uuid.uuid4().hex[:12]}"
+    else:
+        # FAIL CLOSED: no real auth configured (or non-localhost client
+        # hitting a dev-mode instance). Never accept arbitrary credentials.
+        if insecure_dev_auth_enabled():
+            return jsonify({
+                'error': 'Insecure dev-mode auth only permits loopback clients; '
+                         'configure Supabase Auth for network access.'
+            }), 403
+        return jsonify({
+            'error': 'Authentication is not configured on this server. '
+                     'Set SUPABASE_URL / SUPABASE_ANON_KEY and restart.'
+        }), 503
 
     # Issue 24-hour JWT session token
-    token, exp_timestamp = generate_session_jwt(user_id, email)
+    token, exp_timestamp = generate_session_jwt(authenticated_user_id, email)
 
     response = make_response(jsonify({
         'message': 'Login successful',
@@ -126,12 +188,14 @@ def login_page():
     }))
 
     # Set 24-hour session cookie
+    secure_cookie = current_app.config.get('FLASK_ENV', 'production') == 'production'
     response.set_cookie(
         'access_token',
         token,
         max_age=86400,
         httponly=True,
-        samesite='Lax'
+        samesite='Lax',
+        secure=secure_cookie,
     )
     return response
 
@@ -152,7 +216,7 @@ def get_session_info():
     now = int(datetime.now(timezone.utc).timestamp())
     exp = user.get('exp', 0)
     remaining_seconds = max(0, exp - now)
-    
+
     # 3-hour warning trigger (10800 seconds)
     warning_3h = remaining_seconds <= 10800
 

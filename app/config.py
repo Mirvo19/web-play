@@ -29,6 +29,15 @@ class Config:
     SUPABASE_ANON_KEY = os.environ.get('SUPABASE_ANON_KEY', '')
     SUPABASE_SERVICE_ROLE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '')
 
+    # Insecure dev-mode auth fallback. NEVER enable in production: when no
+    # real Supabase auth is configured, the login endpoint refuses to
+    # authenticate unless this is explicitly 'true' — and even then only
+    # for loopback clients (see app/auth.py). Startup validation (Stage 3)
+    # refuses to boot in production with this enabled.
+    ALLOW_INSECURE_DEV_AUTH = os.environ.get('ALLOW_INSECURE_DEV_AUTH', 'false').lower() in ('1', 'true', 'yes')
+
+    FLASK_ENV = os.environ.get('FLASK_ENV', 'production')
+
     # Video Processing
     UPLOAD_FOLDER = os.environ.get('UPLOAD_FOLDER', '/tmp/video-processing')
     MAX_CONTENT_LENGTH = 16 * 1024 * 1024 * 1024  # 16 GB max streaming payload
