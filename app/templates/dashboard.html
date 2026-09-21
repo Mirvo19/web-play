@@ -78,6 +78,7 @@
             <button type="button" class="btn danger" data-delete-video="{{ video.id }}" data-video-title="{{ video.title }}">Delete</button>
           {% elif video.status == 'delete_pending' %}
             <span class="pill warn">delete queued</span>
+            <button type="button" class="btn" data-delete-video="{{ video.id }}" data-video-title="{{ video.title }}">Retry delete</button>
             <button type="button" class="btn danger" data-purge-video="{{ video.id }}" data-video-title="{{ video.title }}">Purge</button>
           {% else %}
             <button type="button" class="btn danger" data-purge-video="{{ video.id }}" data-video-title="{{ video.title }}">Purge</button>

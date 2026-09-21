@@ -195,6 +195,97 @@ def db_session_get(model, key):
     return db.session.get(model, key)
 
 
+class DeleterHonestyTests(unittest.TestCase):
+    def _setup_delete_job(self, n_files=2):
+        from app.models import Video, VideoFile, Job, CDNAccount, db
+        with self.app.app_context():
+            acc = CDNAccount.query.first()
+            video = Video(title="doomed", status="delete_pending",
+                          cdn_account_id=acc.id)
+            db.session.add(video)
+            db.session.commit()
+            for i in range(n_files):
+                db.session.add(VideoFile(
+                    video_id=video.id, cdn_account_id=acc.id,
+                    remote_path=f"file-{i}", remote_url=f"http://x/{i}",
+                    file_size=10, file_type="segment", upload_status="uploaded"))
+            job = Job(video_id=video.id, job_type="delete_video", status="queued")
+            db.session.add(job)
+            db.session.commit()
+            return video.id, job.id
+
+    def setUp(self):
+        self.app = create_app(_test_config())
+        self.client = _authed_client(self.app)
+
+    def test_successful_delete_completes(self):
+        from app.worker import deleter
+        from app.cdn.manager import CDNManager
+        from app.models import Video, Job, db
+
+        vid, jid = self._setup_delete_job()
+
+        class GoodProvider:
+            def delete_file(self, ident):
+                return True, [{"endpoint": "x", "status": 204, "body": ""}]
+
+        orig = CDNManager.get_provider_instance
+        CDNManager.get_provider_instance = classmethod(lambda cls, acc: GoodProvider())
+        try:
+            with self.app.app_context():
+                deleter.execute_video_deletion(jid)
+        finally:
+            CDNManager.get_provider_instance = orig
+        with self.app.app_context():
+            self.assertEqual(db.session.get(Job, jid).status, "completed")
+            self.assertEqual(db.session.get(Video, vid).status, "deleted")
+
+    def test_auth_rejection_fails_job_and_keeps_video(self):
+        from app.worker import deleter
+        from app.cdn.manager import CDNManager
+        from app.models import Video, Job, db
+
+        vid, jid = self._setup_delete_job()
+
+        class BadKeyProvider:
+            def delete_file(self, ident):
+                return False, [{"endpoint": "x", "status": 401,
+                                "body": '{"error":"invalid_auth"}'}]
+
+        orig = CDNManager.get_provider_instance
+        CDNManager.get_provider_instance = classmethod(lambda cls, acc: BadKeyProvider())
+        try:
+            with self.app.app_context():
+                deleter.execute_video_deletion(jid)
+        finally:
+            CDNManager.get_provider_instance = orig
+        with self.app.app_context():
+            job = db.session.get(Job, jid)
+            self.assertEqual(job.status, "failed")
+            self.assertIn("key", job.error_message)
+            # Video stays retryable, NOT marked deleted:
+            self.assertEqual(db.session.get(Video, vid).status, "delete_pending")
+
+    def test_rekey_account_repairs_decryption(self):
+        with self.app.app_context():
+            from app.models import CDNAccount, db
+            acc_id = CDNAccount.query.first().id
+        resp = self.client.put(f"/api/cdn-accounts/{acc_id}",
+                               json={"api_key": "sk_cdn_testkey123"})
+        self.assertEqual(resp.status_code, 200)
+        with self.app.app_context():
+            from app.models import CDNAccount, db
+            acc = db.session.get(CDNAccount, acc_id)
+            self.assertEqual(acc.get_api_key(), "sk_cdn_testkey123")
+
+    def test_rekey_rejects_empty_key(self):
+        with self.app.app_context():
+            from app.models import CDNAccount
+            acc_id = CDNAccount.query.first().id
+        resp = self.client.put(f"/api/cdn-accounts/{acc_id}", json={"api_key": "  "})
+        self.assertEqual(resp.status_code, 400)
+
+
 class SupervisorTests(unittest.TestCase):
     def test_claim_empty_queue_and_clean_stop(self):
         from app.worker.supervisor import JobSupervisor, claim_next_job

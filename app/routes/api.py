@@ -609,6 +609,37 @@ def refresh_cdn_storage(account_id):
     return jsonify({'success': True, 'storage': account.get_latest_storage()})
 
 
+@api_bp.route('/cdn-accounts/<account_id>', methods=['PUT'])
+@login_required
+def update_cdn_account(account_id):
+    """Update a CDN account's name and/or API key in place.
+
+    Keeps the account ID stable so videos already pointing at it keep
+    working. This is the repair path for accounts whose stored key can no
+    longer be decrypted (e.g. after CDN_ENCRYPTION_KEY rotation): paste the
+    current plaintext key and the account works again.
+    """
+    account = db.session.get(CDNAccount, account_id)
+    if account is None:
+        return jsonify({'error': 'CDN account not found'}), 404
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': 'Request body must be a JSON object'}), 400
+    if 'name' in data:
+        name = (data.get('name') or '').strip()
+        if not name:
+            return jsonify({'error': 'Account name must not be empty'}), 400
+        account.name = name[:100]
+    if 'api_key' in data:
+        api_key = (data.get('api_key') or '').strip()
+        if not api_key:
+            return jsonify({'error': 'API key must not be empty'}), 400
+        account.set_api_key(api_key)
+    db.session.commit()
+    current_app.logger.warning("CDN account %s credentials updated", account_id)
+    return jsonify(account.to_dict(include_storage=False)), 200
+
+
 @api_bp.route('/cdn-accounts/<account_id>', methods=['DELETE'])
 @login_required
 def delete_cdn_account(account_id):

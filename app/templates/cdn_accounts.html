@@ -60,6 +60,7 @@
         <td class="r">
           <button type="button" class="btn" data-test-cdn="{{ acc.id }}">Test</button>
           <button type="button" class="btn" data-refresh-cdn="{{ acc.id }}">Refresh</button>
+          <button type="button" class="btn" data-rekey-cdn="{{ acc.id }}" data-cdn-name="{{ acc.name }}">Update key</button>
           <button type="button" class="btn danger" data-delete-cdn="{{ acc.id }}" data-cdn-name="{{ acc.name }}">Delete</button>
         </td>
       </tr>
@@ -122,6 +123,37 @@
         })
         .catch(function () { HC.toast('error', 'Refresh failed', 'Request failed.'); })
         .finally(function () { btn.disabled = false; });
+    });
+  });
+
+  document.querySelectorAll('[data-rekey-cdn]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var id = btn.getAttribute('data-rekey-cdn');
+      var name = btn.getAttribute('data-cdn-name') || id;
+      var key = window.prompt('Paste the current API key for "' + name + '":\n(stored encrypted; repairs accounts the server can no longer decrypt)');
+      if (key === null) return;
+      key = key.trim();
+      if (!key) {
+        HC.toast('error', 'Update cancelled', 'Empty key — nothing changed.');
+        return;
+      }
+      btn.disabled = true;
+      fetch('/api/cdn-accounts/' + encodeURIComponent(id), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ api_key: key })
+      }).then(function (resp) {
+        return resp.json().then(function (data) { return { ok: resp.ok, data: data }; });
+      }).then(function (out) {
+        if (out.ok) {
+          HC.toast('success', 'Key updated', 'Use Test to verify it against the CDN.');
+          setTimeout(function () { window.location.reload(); }, 1200);
+        } else {
+          HC.toast('error', 'Update failed', out.data.error || 'Could not update key.');
+        }
+      }).catch(function () {
+        HC.toast('error', 'Update failed', 'Request failed.');
+      }).finally(function () { btn.disabled = false; });
     });
   });
 

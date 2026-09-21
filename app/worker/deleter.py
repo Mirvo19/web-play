@@ -57,8 +57,26 @@ def execute_video_deletion(job_id: str):
 
     deleted_count = 0
     failed_count = 0
+    auth_rejected = False
 
     for idx, f in enumerate(files):
+        # Honour user cancellation between files. If the job row itself is
+        # gone (purged mid-run), stop quietly — there is nothing to update.
+        try:
+            db.session.refresh(job)
+        except Exception:
+            _logger.warning("Delete job %s vanished mid-run; stopping.", job_id)
+            return
+        if job.cancel_requested or job.status == 'cancelled':
+            job.status = 'cancelled'
+            job.stage = 'cancelled'
+            job.current_step = 'Cancelled'
+            job.current_message = 'Deletion cancelled by user'
+            job.completed_at = datetime.now(timezone.utc)
+            db.session.commit()
+            log_delete_job(job_id, 'Deletion cancelled by user', level='WARNING')
+            return
+
         if cdn_provider:
             # Prefer the provider's stored remote identifier, then the public URL.
             identifier = f.remote_path or f.remote_url
@@ -96,6 +114,16 @@ def execute_video_deletion(job_id: str):
                 else:
                     failed_count += 1
                     log_delete_job(job_id, f"Failed to delete remote file (provider returned False): {identifier}", level='WARNING')
+                    if _attempts_show_auth_rejection(attempts):
+                        auth_rejected = True
+                        log_delete_job(
+                            job_id,
+                            "CDN API rejected the key (401 invalid_auth). Aborting: "
+                            "update the CDN account key and retry — hammering "
+                            "further endpoints cannot succeed.",
+                            level='ERROR',
+                        )
+                        break
             except Exception as e:
                 failed_count += 1
                 log_delete_job(job_id, f"Failed to delete remote file {identifier}: {str(e)}", level='WARNING')
@@ -110,11 +138,33 @@ def execute_video_deletion(job_id: str):
             job.current_step = f"Deleting CDN files ({deleted_count}/{total_files})"
             db.session.commit()
 
+    # --- Honest completion: only claim success when every file is gone. ---
     log_delete_job(job_id, f"Files: {deleted_count} / {total_files} deleted")
-    log_delete_job(job_id, "✓ CDN files deleted")
-    log_delete_job(job_id, "✓ Playlists deleted")
-    log_delete_job(job_id, "✓ Thumbnail deleted")
-    log_delete_job(job_id, "✓ Database metadata removing")
+    if failed_count > 0:
+        if auth_rejected:
+            job.error_message = (
+                f"CDN API rejected the account key (401 invalid_auth); "
+                f"{deleted_count}/{total_files} files deleted. Update the CDN "
+                f"account key and retry the deletion."
+            )
+        else:
+            job.error_message = (
+                f"Only {deleted_count}/{total_files} CDN files could be deleted. "
+                f"Video left as delete_pending so you can retry."
+            )
+        job.status = 'failed'
+        job.stage = 'failed'
+        job.current_step = 'Deletion incomplete'
+        job.completed_at = datetime.now(timezone.utc)
+        db.session.commit()
+        log_delete_job(job_id, f"Deletion FAILED: {job.error_message}", level='ERROR')
+        _logger.error("Delete job %s failed: %s", job_id, job.error_message)
+        return
+
+    log_delete_job(job_id, "CDN files deleted")
+    log_delete_job(job_id, "Playlists deleted")
+    log_delete_job(job_id, "Thumbnail deleted")
+    log_delete_job(job_id, "Database metadata removing")
 
     # Mark video as deleted but keep DB records so job history/logs remain visible
     video.status = 'deleted'
@@ -127,3 +177,18 @@ def execute_video_deletion(job_id: str):
     db.session.commit()
 
     log_delete_job(job_id, "Video completely deleted.")
+
+
+def _attempts_show_auth_rejection(attempts) -> bool:
+    """True when provider attempt details show a 401/invalid_auth response."""
+    if not attempts:
+        return False
+    for a in attempts:
+        if not isinstance(a, dict):
+            continue
+        if a.get('status') == 401:
+            return True
+        body = str(a.get('body') or '')
+        if 'invalid_auth' in body:
+            return True
+    return False
