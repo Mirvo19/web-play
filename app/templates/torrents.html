@@ -1,0 +1,438 @@
+{% extends "base.html" %}
+
+{% block title %}Torrents — HC CDN Player{% endblock %}
+{% block header_title %}Torrent ingest{% endblock %}
+{% block header_sub %}isolated download · validate · hand off to the transcode pipeline{% endblock %}
+
+{% block content %}
+<div class="grid grid-2">
+  <div class="panel" data-enter>
+    <div class="panel-head"><h2><svg class="ic" aria-hidden="true"><use href="#i-magnet"/></svg>Paste magnet link</h2></div>
+    <div class="panel-body">
+      <form id="magnetForm">
+        <div class="field">
+          <label for="magnetInput">Magnet URI</label>
+          <input type="text" id="magnetInput" placeholder="magnet:?xt=urn:btih:…" required autocomplete="off" spellcheck="false">
+          <div class="help">Only metadata (file list) is fetched first — nothing downloads until you pick files.</div>
+        </div>
+        <button type="submit" class="btn primary" style="width: 100%; justify-content: center;" id="magnetSubmit">Fetch file list</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="panel" data-enter>
+    <div class="panel-head"><h2><svg class="ic" aria-hidden="true"><use href="#i-upload"/></svg>Upload .torrent file</h2></div>
+    <div class="panel-body">
+      <div class="dropzone" id="torrentDrop" role="button" tabindex="0" aria-label="Choose a .torrent file">
+        <svg class="ic-lg" aria-hidden="true"><use href="#i-magnet"/></svg>
+        <div style="font-weight: 600; margin-top: 6px;" id="torrentDropLabel">Drop a .torrent here or click to browse</div>
+        <div class="help">Parsed locally for its file list (5 MB cap). Peers are only contacted after you pick files.</div>
+      </div>
+      <input type="file" id="torrentFile" accept=".torrent,application/x-bittorrent" style="display: none;">
+    </div>
+  </div>
+</div>
+
+<div class="panel" data-enter>
+  <div class="panel-head"><h2><svg class="ic" aria-hidden="true"><use href="#i-pulse"/></svg>Torrent jobs</h2><span class="pill dim" id="torrentCount">0 shown</span></div>
+  <div class="panel-body" id="torrentList">
+    <div class="empty">No torrent jobs yet — paste a magnet or drop a .torrent file above.</div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script id="torrent-bootstrap" type="application/json">{{ {'cdn_accounts': cdn_accounts}|tojson }}</script>
+<script>
+(function () {
+  'use strict';
+  var boot = JSON.parse(document.getElementById('torrent-bootstrap').textContent);
+  var ACCOUNTS = boot.cdn_accounts || [];
+  var listBox = document.getElementById('torrentList');
+  var countPill = document.getElementById('torrentCount');
+  var magnetForm = document.getElementById('magnetForm');
+  var magnetInput = document.getElementById('magnetInput');
+  var magnetSubmit = document.getElementById('magnetSubmit');
+  var torrentDrop = document.getElementById('torrentDrop');
+  var torrentFile = document.getElementById('torrentFile');
+  var torrentDropLabel = document.getElementById('torrentDropLabel');
+  var knownIds = {};
+  var ACTIVE = ['fetching_metadata', 'awaiting_selection', 'downloading', 'validating'];
+
+  function pillClass(state) {
+    if (state === 'handed_off') return 'ok';
+    if (state === 'failed') return 'bad';
+    if (state === 'cancelled') return 'dim';
+    if (state === 'awaiting_selection') return 'info';
+    if (state === 'downloading') return 'warn live';
+    return 'warn';
+  }
+
+  function stateLabel(state) {
+    return (state || '').replace(/_/g, ' ');
+  }
+
+  function fmtEta(sec) {
+    if (sec === null || sec === undefined) return '—';
+    if (sec < 60) return sec + 's';
+    var m = Math.floor(sec / 60);
+    if (m < 60) return m + 'm ' + (sec % 60) + 's';
+    return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+  }
+
+  /* Snapshot checkbox + account choices so the 2s re-render never eats them. */
+  function snapshotUi() {
+    var snap = {};
+    listBox.querySelectorAll('[data-t-card]').forEach(function (card) {
+      var id = card.getAttribute('data-t-card');
+      var checked = [];
+      card.querySelectorAll('input[data-t-idx]:checked').forEach(function (box) {
+        checked.push(box.getAttribute('data-t-idx'));
+      });
+      var acc = card.querySelector('[data-t-account]');
+      snap[id] = { checked: checked, account: acc ? acc.value : '' };
+    });
+    return snap;
+  }
+
+  function accountOptions(selected) {
+    var frag = document.createDocumentFragment();
+    if (!ACCOUNTS.length) {
+      var none = document.createElement('option');
+      none.value = '';
+      none.disabled = true;
+      none.selected = true;
+      none.textContent = 'No CDN accounts — add one under CDN first.';
+      frag.appendChild(none);
+      return frag;
+    }
+    ACCOUNTS.forEach(function (acc) {
+      var opt = document.createElement('option');
+      opt.value = acc.id;
+      opt.textContent = acc.name;
+      if (acc.id === selected) opt.selected = true;
+      frag.appendChild(opt);
+    });
+    return frag;
+  }
+
+  function selectedTotal(t, checked) {
+    var byIndex = {};
+    (t.files || []).forEach(function (f) { byIndex[f.index] = f.size || 0; });
+    return checked.reduce(function (sum, idx) { return sum + (byIndex[parseInt(idx, 10)] || 0); }, 0);
+  }
+
+  function renderCard(t, snap) {
+    var card = HC.el('div', { className: 'panel', 'data-t-card': t.id });
+    card.style.marginBottom = '10px';
+    var head = HC.el('div', { className: 'panel-head' });
+    var title = HC.el('h2');
+    title.appendChild(HC.svgIcon('i-magnet'));
+    title.appendChild(HC.el('span', null, ' ' + (t.display_name || t.id.slice(0, 8))));
+    head.appendChild(title);
+    var right = HC.el('div', { className: 'btn-row' });
+    right.appendChild(HC.el('span', { className: 'pill ' + pillClass(t.state) }, stateLabel(t.state)));
+    if (ACTIVE.indexOf(t.state) !== -1) {
+      var cancel = HC.el('button', { type: 'button', className: 'btn danger', 'data-t-cancel': t.id }, 'Cancel');
+      right.appendChild(cancel);
+    }
+    head.appendChild(right);
+    card.appendChild(head);
+
+    var body = HC.el('div', { className: 'panel-body' });
+    if (t.state === 'fetching_metadata') {
+      body.appendChild(HC.el('div', { className: 'mono', style: 'color:var(--muted);' },
+        'Contacting peers for the file list — payload download has NOT started.'));
+    } else if (t.state === 'awaiting_selection') {
+      var table = HC.el('table', { className: 'tbl' });
+      var thead = HC.el('thead');
+      var hr = HC.el('tr');
+      ['Fetch', 'File', 'Size'].forEach(function (h, i) {
+        var th = HC.el('th', null, h);
+        if (i === 2) th.className = 'r';
+        hr.appendChild(th);
+      });
+      thead.appendChild(hr);
+      table.appendChild(thead);
+      var tbody = HC.el('tbody');
+      (t.files || []).forEach(function (f) {
+        var tr = HC.el('tr');
+        var tdCheck = HC.el('td');
+        var box = document.createElement('input');
+        box.type = 'checkbox';
+        box.setAttribute('data-t-idx', String(f.index));
+        box.setAttribute('aria-label', 'Download ' + f.path);
+        if ((snap.checked || []).indexOf(String(f.index)) !== -1) box.checked = true;
+        tdCheck.appendChild(box);
+        tr.appendChild(tdCheck);
+        var tdPath = HC.el('td');
+        tdPath.appendChild(HC.el('span', { className: 'mono' }, f.path));
+        tr.appendChild(tdPath);
+        var tdSize = HC.el('td', { className: 'num r' }, HC.formatBytes(f.size || 0));
+        tr.appendChild(tdSize);
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      var scroll = HC.el('div', { className: 'table-scroll' });
+      scroll.appendChild(table);
+      body.appendChild(scroll);
+      var foot = HC.el('div', { className: 'btn-row' });
+      foot.style.cssText = 'margin-top:10px;align-items:center;';
+      foot.appendChild(HC.el('span', { className: 'num', 'data-t-total': t.id }, '0 B selected'));
+      var accSel = document.createElement('select');
+      accSel.setAttribute('data-t-account', t.id);
+      accSel.setAttribute('aria-label', 'CDN account for handoff');
+      accSel.style.cssText = 'flex:1;min-width:160px;';
+      accSel.appendChild(accountOptions(snap.account));
+      foot.appendChild(accSel);
+      var start = HC.el('button', { type: 'button', className: 'btn primary', 'data-t-start': t.id }, 'Download selected');
+      foot.appendChild(start);
+      body.appendChild(foot);
+    } else if (t.state === 'downloading' || t.state === 'validating') {
+      var pct = (t.progress && t.progress.pct) || 0;
+      var bar = HC.el('div', { className: 'bar' });
+      var fill = HC.el('div');
+      fill.style.width = pct + '%';
+      bar.appendChild(fill);
+      body.appendChild(bar);
+      var meta = HC.el('div', { className: 'num' });
+      meta.style.margin = '6px 0 8px';
+      var doneTxt = HC.formatBytes((t.progress && t.progress.bytes_done) || 0);
+      var totalTxt = HC.formatBytes((t.progress && t.progress.bytes_total) || 0);
+      meta.textContent = t.state === 'validating' ? 'Checking media files…'
+        : pct + '% · ' + doneTxt + ' / ' + totalTxt
+        + ' · ' + HC.formatBytes(t.speed_bps || 0) + '/s · ETA ' + fmtEta(t.eta_seconds);
+      body.appendChild(meta);
+      var perFile = (t.progress && t.progress.per_file) || {};
+      var byIndex = {};
+      (t.files || []).forEach(function (f) { byIndex[f.index] = f; });
+      Object.keys(perFile).forEach(function (idx) {
+        var f = byIndex[parseInt(idx, 10)] || { path: 'file ' + idx, size: 0 };
+        var row = HC.el('div');
+        row.style.marginBottom = '6px';
+        row.appendChild(HC.el('div', { className: 'mono' },
+          (f.path || ('file ' + idx)) + ' — ' + HC.formatBytes(perFile[idx]) + ' / ' + HC.formatBytes(f.size || 0)));
+        var fbar = HC.el('div', { className: 'bar thin' });
+        var ffill = HC.el('div');
+        ffill.style.width = (f.size ? Math.min(100, perFile[idx] / f.size * 100) : 0) + '%';
+        fbar.appendChild(ffill);
+        row.appendChild(fbar);
+        body.appendChild(row);
+      });
+    } else if (t.state === 'handed_off') {
+      var ok = HC.el('div', { className: 'alert' });
+      ok.style.borderColor = 'var(--ok)';
+      ok.appendChild(HC.el('strong', null, 'In the transcode pipeline. '));
+      var link = HC.el('a', { href: '/jobs/' + encodeURIComponent(t.pipeline_job_id || '') }, 'View transcode job');
+      ok.appendChild(link);
+      body.appendChild(ok);
+      (t.handed || []).forEach(function (h) {
+        var line = HC.el('div', { className: 'mono' });
+        line.style.marginBottom = '4px';
+        line.appendChild(HC.el('span', null, (h.filename || '') + ' → '));
+        line.appendChild(HC.el('a', { href: '/jobs/' + encodeURIComponent(h.job_id || '') }, 'job ' + (h.job_id || '').slice(0, 8)));
+        body.appendChild(line);
+      });
+    } else if (t.state === 'failed') {
+      var bad = HC.el('div', { className: 'alert bad' });
+      bad.textContent = t.error_message || 'Failed.';
+      body.appendChild(bad);
+    } else if (t.state === 'cancelled') {
+      body.appendChild(HC.el('div', { className: 'empty' }, 'Cancelled — quarantine wiped.'));
+    }
+    card.appendChild(body);
+    return card;
+  }
+
+  function refresh() {
+    fetch('/api/torrents').then(function (resp) {
+      if (!resp.ok) return null;
+      return resp.json();
+    }).then(function (data) {
+      if (!data) return;
+      var snap = snapshotUi();
+      var items = data.torrents || [];
+      countPill.textContent = items.length + ' shown';
+      /* Remove cards for torrents that vanished (none expected, but safe). */
+      listBox.querySelectorAll('[data-t-card]').forEach(function (card) {
+        var id = card.getAttribute('data-t-card');
+        if (!items.some(function (t) { return t.id === id; })) card.remove();
+      });
+      if (!items.length) {
+        listBox.textContent = '';
+        listBox.appendChild(HC.el('div', { className: 'empty' }, 'No torrent jobs yet — paste a magnet or drop a .torrent file above.'));
+        return;
+      }
+      var empty = listBox.querySelector('.empty');
+      if (empty && listBox.children.length === 1) listBox.textContent = '';
+      items.forEach(function (t) {
+        /* Re-render only when something visible changed — never steal
+           checkbox focus or rebuild the DOM on an identical poll. */
+        var sig = [t.state, (t.progress && t.progress.pct) || 0,
+                   (t.files || []).length, (t.handed || []).length,
+                   t.updated_at || ''].join('|');
+        var existing = listBox.querySelector('[data-t-card="' + t.id + '"]');
+        if (existing && existing._hcSig === sig) return;
+        var fresh = renderCard(t, snap[t.id] || { checked: [], account: '' });
+        fresh._hcSig = sig;
+        if (existing) {
+          existing.replaceWith(fresh);
+        } else {
+          listBox.appendChild(fresh);
+          if (window.HC) window.HC.enter(fresh);
+        }
+      });
+      /* Live-update the selected-total readout without disturbing checkboxes. */
+      listBox.querySelectorAll('[data-t-card]').forEach(function (card) {
+        var id = card.getAttribute('data-t-card');
+        var total = card.querySelector('[data-t-total]');
+        if (!total) return;
+        var checked = [];
+        card.querySelectorAll('input[data-t-idx]:checked').forEach(function (box) {
+          checked.push(box.getAttribute('data-t-idx'));
+        });
+        var t = items.filter(function (x) { return x.id === id; })[0];
+        if (t) total.textContent = HC.formatBytes(selectedTotal(t, checked)) + ' selected';
+      });
+    }).catch(function () { /* transient; next tick retries */ });
+  }
+
+  /* Live selected-total + delegation for start/cancel (survives re-renders). */
+  listBox.addEventListener('change', function (e) {
+    var box = e.target.closest ? e.target.closest('input[data-t-idx]') : null;
+    if (!box) return;
+    var card = e.target.closest('[data-t-card]');
+    if (!card) return;
+    var id = card.getAttribute('data-t-card');
+    var checked = [];
+    card.querySelectorAll('input[data-t-idx]:checked').forEach(function (b) {
+      checked.push(b.getAttribute('data-t-idx'));
+    });
+    var total = card.querySelector('[data-t-total]');
+    if (!total) return;
+    fetch('/api/torrents/' + encodeURIComponent(id)).then(function (resp) {
+      if (!resp.ok) return null;
+      return resp.json();
+    }).then(function (t) {
+      if (t) total.textContent = HC.formatBytes(selectedTotal(t, checked)) + ' selected';
+    }).catch(function () { /* transient */ });
+  });
+
+  listBox.addEventListener('click', function (e) {
+    var start = e.target.closest ? e.target.closest('[data-t-start]') : null;
+    if (start) {
+      var id = start.getAttribute('data-t-start');
+      var card = start.closest('[data-t-card]');
+      var checked = [];
+      card.querySelectorAll('input[data-t-idx]:checked').forEach(function (b) {
+        checked.push(parseInt(b.getAttribute('data-t-idx'), 10));
+      });
+      var accSel = card.querySelector('[data-t-account]');
+      var account = accSel ? accSel.value : '';
+      if (!checked.length) {
+        HC.toast('error', 'Nothing selected', 'Tick at least one file to download.');
+        return;
+      }
+      if (!account) {
+        HC.toast('error', 'No CDN account', 'Pick the CDN account the handoff will use.');
+        return;
+      }
+      start.disabled = true;
+      fetch('/api/torrents/' + encodeURIComponent(id) + '/select', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ indexes: checked, cdn_account_id: account })
+      }).then(function (resp) {
+        return resp.json().then(function (data) { return { ok: resp.ok, data: data }; });
+      }).then(function (out) {
+        if (!out.ok) HC.toast('error', 'Download refused', out.data.error || 'Could not start download.');
+        refresh();
+      }).catch(function () {
+        HC.toast('error', 'Download refused', 'Network error.');
+        start.disabled = false;
+      });
+      return;
+    }
+    var cancel = e.target.closest ? e.target.closest('[data-t-cancel]') : null;
+    if (cancel) {
+      var cid = cancel.getAttribute('data-t-cancel');
+      cancel.disabled = true;
+      fetch('/api/torrents/' + encodeURIComponent(cid) + '/cancel', { method: 'POST' })
+        .then(function () { refresh(); })
+        .catch(function () {
+          HC.toast('error', 'Cancel failed', 'Could not reach cancel endpoint.');
+          cancel.disabled = false;
+        });
+    }
+  });
+
+  magnetForm.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var magnet = magnetInput.value.trim();
+    if (!magnet) return;
+    magnetSubmit.disabled = true;
+    fetch('/api/torrents/submit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ magnet: magnet })
+    }).then(function (resp) {
+      return resp.json().then(function (data) { return { ok: resp.ok, data: data }; });
+    }).then(function (out) {
+      if (out.ok) {
+        magnetInput.value = '';
+        HC.toast('success', 'Torrent submitted', 'Fetching the file list — pick files when it appears.');
+        refresh();
+      } else {
+        HC.toast('error', 'Submit failed', out.data.error || 'Could not submit torrent.');
+      }
+    }).catch(function () {
+      HC.toast('error', 'Submit failed', 'Network error submitting torrent.');
+    }).finally(function () { magnetSubmit.disabled = false; });
+  });
+
+  function sendTorrentFile(file) {
+    if (!file) return;
+    torrentDropLabel.textContent = file.name + ' (' + HC.formatBytes(file.size) + ') — uploading…';
+    var form = new FormData();
+    form.append('file', file, file.name);
+    fetch('/api/torrents/submit', { method: 'POST', body: form })
+      .then(function (resp) {
+        return resp.json().then(function (data) { return { ok: resp.ok, data: data }; });
+      }).then(function (out) {
+        if (out.ok) {
+          HC.toast('success', 'Torrent submitted', 'Parsing file list — pick files when it appears.');
+          refresh();
+        } else {
+          HC.toast('error', 'Submit failed', out.data.error || 'Could not submit torrent.');
+        }
+        torrentDropLabel.textContent = 'Drop a .torrent here or click to browse';
+      }).catch(function () {
+        HC.toast('error', 'Submit failed', 'Network error submitting torrent.');
+        torrentDropLabel.textContent = 'Drop a .torrent here or click to browse';
+      });
+  }
+
+  torrentDrop.addEventListener('click', function () { torrentFile.click(); });
+  torrentDrop.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); torrentFile.click(); }
+  });
+  ['dragenter', 'dragover'].forEach(function (ev) {
+    torrentDrop.addEventListener(ev, function (e) { e.preventDefault(); torrentDrop.classList.add('over'); });
+  });
+  ['dragleave', 'drop'].forEach(function (ev) {
+    torrentDrop.addEventListener(ev, function (e) { e.preventDefault(); torrentDrop.classList.remove('over'); });
+  });
+  torrentDrop.addEventListener('drop', function (e) {
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+      sendTorrentFile(e.dataTransfer.files[0]);
+    }
+  });
+  torrentFile.addEventListener('change', function () {
+    if (torrentFile.files.length) sendTorrentFile(torrentFile.files[0]);
+    torrentFile.value = '';
+  });
+
+  HC.poll(refresh, 2000);
+})();
+</script>
+{% endblock %}

@@ -39,6 +39,41 @@
           <input type="number" id="hlsSegmentDuration" min="2" max="15" value="{{ settings.hls_segment_duration }}" required>
           <div class="help">Shorter segments seek faster; longer ones compress better.</div>
         </div>
+
+        <h3 style="font-size: 13px; margin: 16px 0 8px;">Torrent ingestion (isolated aria2c)</h3>
+        <div class="field">
+          <label for="torrentEnabled">Enabled</label>
+          <select id="torrentEnabled" required>
+            <option value="true" {% if settings.torrent_enabled == 'true' %}selected{% endif %}>enabled</option>
+            <option value="false" {% if settings.torrent_enabled != 'true' %}selected{% endif %}>disabled</option>
+          </select>
+          <div class="help">Disabled stops new submissions; in-flight downloads finish.</div>
+        </div>
+        <div class="field">
+          <label for="torrentMaxConcurrent">Max concurrent torrent downloads (1–4)</label>
+          <input type="number" id="torrentMaxConcurrent" min="1" max="4" value="{{ settings.torrent_max_concurrent }}" required>
+        </div>
+        <div class="field">
+          <label for="torrentMaxTotalMb">Max selected size per torrent, MB (100–16384)</label>
+          <input type="number" id="torrentMaxTotalMb" min="100" max="16384" value="{{ settings.torrent_max_total_mb }}" required>
+        </div>
+        <div class="field">
+          <label for="torrentMaxPeers">Max peers per torrent (5–500)</label>
+          <input type="number" id="torrentMaxPeers" min="5" max="500" value="{{ settings.torrent_max_peers }}" required>
+        </div>
+        <div class="field">
+          <label for="torrentBandwidthKbps">Bandwidth cap, KB/s (0–100000, 0 = uncapped)</label>
+          <input type="number" id="torrentBandwidthKbps" min="0" max="100000" value="{{ settings.torrent_bandwidth_kbps }}" required>
+        </div>
+        <div class="field">
+          <label for="torrentTimeoutSec">Download wall-clock timeout, seconds (60–86400)</label>
+          <input type="number" id="torrentTimeoutSec" min="60" max="86400" value="{{ settings.torrent_timeout_sec }}" required>
+          <div class="help">Stalled torrents are auto-cancelled and wiped after this long.</div>
+        </div>
+        <div class="field">
+          <label for="torrentMetadataTimeoutSec">Metadata fetch timeout, seconds (15–600)</label>
+          <input type="number" id="torrentMetadataTimeoutSec" min="15" max="600" value="{{ settings.torrent_metadata_timeout_sec }}" required>
+        </div>
         <div class="alert bad" id="settingsError" style="display: none;"></div>
         <button type="submit" class="btn primary" style="width: 100%; justify-content: center;"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg>Save settings</button>
       </form>
@@ -74,7 +109,14 @@
       max_concurrent_jobs: document.getElementById('maxConcurrency').value,
       ffmpeg_preset: document.getElementById('ffmpegPreset').value,
       ffmpeg_crf: document.getElementById('ffmpegCrf').value,
-      hls_segment_duration: document.getElementById('hlsSegmentDuration').value
+      hls_segment_duration: document.getElementById('hlsSegmentDuration').value,
+      torrent_enabled: document.getElementById('torrentEnabled').value,
+      torrent_max_concurrent: document.getElementById('torrentMaxConcurrent').value,
+      torrent_max_total_mb: document.getElementById('torrentMaxTotalMb').value,
+      torrent_max_peers: document.getElementById('torrentMaxPeers').value,
+      torrent_bandwidth_kbps: document.getElementById('torrentBandwidthKbps').value,
+      torrent_timeout_sec: document.getElementById('torrentTimeoutSec').value,
+      torrent_metadata_timeout_sec: document.getElementById('torrentMetadataTimeoutSec').value
     };
     fetch('/api/settings', {
       method: 'POST',

@@ -90,6 +90,13 @@ def cdn_accounts():
     return render_template('cdn_accounts.html', cdn_accounts=accounts_info,
                            cdn_source=source, cdn_source_detail=detail)
 
+@views_bp.route('/torrents')
+@login_required
+def torrents():
+    cdn_accounts = CDNAccount.query.filter_by(enabled=True).all()
+    accounts_info = [acc.to_dict(include_storage=False) for acc in cdn_accounts]
+    return render_template('torrents.html', cdn_accounts=accounts_info)
+
 @views_bp.route('/stats')
 @login_required
 def stats():
@@ -103,6 +110,13 @@ def settings():
         'max_concurrent_jobs': Setting.get('max_concurrent_jobs', '1'),
         'ffmpeg_preset': Setting.get('ffmpeg_preset', 'veryfast'),
         'ffmpeg_crf': Setting.get('ffmpeg_crf', '23'),
-        'hls_segment_duration': Setting.get('hls_segment_duration', '6')
+        'hls_segment_duration': Setting.get('hls_segment_duration', '6'),
+        'torrent_enabled': Setting.get('torrent_enabled', 'true'),
+        'torrent_max_concurrent': Setting.get('torrent_max_concurrent', '1'),
+        'torrent_max_total_mb': Setting.get('torrent_max_total_mb', '4096'),
+        'torrent_max_peers': Setting.get('torrent_max_peers', '50'),
+        'torrent_bandwidth_kbps': Setting.get('torrent_bandwidth_kbps', '0'),
+        'torrent_timeout_sec': Setting.get('torrent_timeout_sec', '7200'),
+        'torrent_metadata_timeout_sec': Setting.get('torrent_metadata_timeout_sec', '120'),
     }
     return render_template('settings.html', settings=current_settings)

@@ -45,6 +45,7 @@
       <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></symbol>
       <symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></symbol>
       <symbol id="i-max" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"/></symbol>
+      <symbol id="i-magnet" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3v8a6 6 0 0 0 12 0V3"/><path d="M6 7h4M14 7h4"/></symbol>
     </defs>
   </svg>
 
@@ -57,6 +58,7 @@
       <nav aria-label="Primary">
         <a href="{{ url_for('views.dashboard') }}" class="{% if request.endpoint == 'views.dashboard' %}active{% endif %}"><svg class="ic" aria-hidden="true"><use href="#i-film"/></svg>Videos</a>
         <a href="{{ url_for('views.upload') }}" class="{% if request.endpoint == 'views.upload' %}active{% endif %}"><svg class="ic" aria-hidden="true"><use href="#i-upload"/></svg>Upload</a>
+        <a href="{{ url_for('views.torrents') }}" class="{% if request.endpoint == 'views.torrents' %}active{% endif %}"><svg class="ic" aria-hidden="true"><use href="#i-magnet"/></svg>Torrents</a>
         <a href="{{ url_for('views.jobs_list') }}" class="{% if request.endpoint in ('views.jobs_list', 'views.job_detail') %}active{% endif %}"><svg class="ic" aria-hidden="true"><use href="#i-pulse"/></svg>Jobs</a>
         <a href="{{ url_for('views.cdn_accounts') }}" class="{% if request.endpoint == 'views.cdn_accounts' %}active{% endif %}"><svg class="ic" aria-hidden="true"><use href="#i-globe"/></svg>CDN</a>
         <a href="{{ url_for('views.stats') }}" class="{% if request.endpoint == 'views.stats' %}active{% endif %}"><svg class="ic" aria-hidden="true"><use href="#i-gauge"/></svg>System</a>

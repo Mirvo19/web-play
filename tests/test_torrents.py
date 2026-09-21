@@ -331,5 +331,21 @@ class CoordinatorRecoveryTests(unittest.TestCase):
             coord.stop(timeout=10)
 
 
+class TorrentsPageTests(unittest.TestCase):
+    def test_tab_renders_with_contracts(self):
+        app = create_app(_test_config())
+        client = _authed_client(app)
+        html = client.get("/torrents").data.decode()
+        for needle in ["torrent-bootstrap", "magnetForm", "magnetInput",
+                       "torrentDrop", "torrentFile", "torrentList",
+                       "/api/torrents"]:
+            self.assertIn(needle, html)
+        dash = client.get("/dashboard").data.decode()
+        self.assertIn('href="/torrents"', dash)
+        settings = client.get("/settings").data.decode()
+        self.assertIn("torrentEnabled", settings)
+        self.assertIn("torrentMaxTotalMb", settings)
+
+
 if __name__ == "__main__":
     unittest.main()
