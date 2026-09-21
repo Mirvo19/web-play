@@ -140,6 +140,18 @@ class SubmitTests(unittest.TestCase):
         with self.assertRaises(OSError):
             quarantine_base(self.app)
 
+    def test_default_quarantine_lives_in_app_tree(self):
+        from app.torrents.coordinator import quarantine_base
+
+        self.app.config["TORRENT_QUARANTINE_FOLDER"] = ""
+        base = quarantine_base(self.app)
+        self.assertTrue(base.endswith("torrent-quarantine"))
+        self.assertTrue(os.path.isdir(base))
+        upload = os.path.abspath(self.app.config["UPLOAD_FOLDER"])
+        self.assertFalse(os.path.abspath(base).startswith(upload + os.sep))
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
     def test_magnet_submit_ok_when_available(self):
         from app.torrents import engine as _eng
         from app.models import TorrentJob

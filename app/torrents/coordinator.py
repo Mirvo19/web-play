@@ -22,15 +22,23 @@ from datetime import datetime, timezone
 _log = logging.getLogger(__name__)
 
 
+def _app_root() -> str:
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
 def quarantine_base(app) -> str:
-    """Quarantine root — deliberately OUTSIDE UPLOAD_FOLDER so the job
-    supervisor's orphan-workspace sweep can never touch it."""
+    """Quarantine root.
+
+    Default: <app>/torrent-quarantine — inside the already-existing,
+    already-writable app dir on purpose. A /tmp sibling was tried first
+    and rejected: under ProtectSystem=strict every ReadWritePaths entry
+    must pre-exist on the host (systemd builds sandbox mounts BEFORE
+    ExecStartPre), so a fresh /tmp path fails boot with 226/NAMESPACE and
+    stays fragile across tmpfiles aging. Override with
+    TORRENT_QUARANTINE_FOLDER for exotic layouts.
+    """
     configured = (app.config.get("TORRENT_QUARANTINE_FOLDER", "") or "").strip()
-    if configured:
-        base = os.path.abspath(configured)
-    else:
-        upload = os.path.abspath(app.config.get("UPLOAD_FOLDER", "/tmp/video-processing"))
-        base = os.path.join(os.path.dirname(upload), "torrent-quarantine")
+    base = os.path.abspath(configured) if configured else os.path.join(_app_root(), "torrent-quarantine")
     os.makedirs(base, mode=0o700, exist_ok=True)
     return base
 

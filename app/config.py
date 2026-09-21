@@ -49,7 +49,8 @@ class Config:
     MAX_UPLOAD_SIZE_GB = float(os.environ.get('MAX_UPLOAD_SIZE_GB', 4))
 
     # --- Torrent ingestion (isolated aria2c engine) ---
-    # Quarantine root; '' = sibling of UPLOAD_FOLDER named torrent-quarantine.
+    # Quarantine root; '' = <app>/torrent-quarantine (deliberately inside the
+    # app tree: sandbox-safe, needs no pre-created host paths).
     TORRENT_QUARANTINE_FOLDER = os.environ.get('TORRENT_QUARANTINE_FOLDER', '')
     TORRENT_ENABLED = os.environ.get('TORRENT_ENABLED', 'true')
     TORRENT_MAX_CONCURRENT = int(os.environ.get('TORRENT_MAX_CONCURRENT', 1))

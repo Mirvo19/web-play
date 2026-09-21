@@ -6,6 +6,7 @@ __pycache__/
 instance/
 uploads/
 tmp/
+torrent-quarantine/
 *.db
 master.md
 cdn-accounts-backup.json
