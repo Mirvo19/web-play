@@ -1,160 +1,140 @@
 {% extends "base.html" %}
 
-{% block title %}CDN Accounts — Video Infrastructure Platform{% endblock %}
-{% block header_title %}Dynamic CDN Account Management{% endblock %}
+{% block title %}CDN accounts — HC CDN Player{% endblock %}
+{% block header_title %}CDN accounts{% endblock %}
+{% block header_sub %}{{ cdn_accounts|length }} configured · keys encrypted at rest{% endblock %}
 
 {% block content %}
-<div class="grid-2">
-  <!-- Add CDN Account Form -->
-  <div class="clay-card">
-    <div class="clay-card-header">
-      <h3 class="clay-card-title">Add CDN Account</h3>
-    </div>
-
-    <form id="addCdnForm">
-      <div class="form-group">
-        <label class="form-label" for="accName">Account Name</label>
-        <input type="text" id="accName" class="form-control" placeholder="Samir's CDN" required>
-      </div>
-
-      <div class="form-group">
-        <label class="form-label" for="provider">Provider</label>
-        <input type="text" id="provider" class="form-control" value="Hack Club CDN" readonly style="background-color: var(--bg-surface);">
-      </div>
-
-      <div class="form-group">
-        <label class="form-label" for="apiKey">API Key (Bearer Token)</label>
-        <input type="password" id="apiKey" class="form-control" placeholder="••••••••••••••••••••••••••••••••" required>
-        <div style="font-size: 0.78rem; color: var(--color-muted); margin-top: 0.3rem;">
-          Encrypted server-side using Fernet. Never exposed in HTML or client logs.
+<div class="grid grid-2">
+  <div class="panel">
+    <div class="panel-head"><h2>Add account</h2></div>
+    <div class="panel-body">
+      <form id="addCdnForm">
+        <div class="field">
+          <label for="accName">Account name</label>
+          <input type="text" id="accName" placeholder="Primary CDN" required>
         </div>
-      </div>
-
-      <div style="display: flex; gap: 0.75rem; margin-top: 1rem;">
-        <button type="submit" class="btn btn-primary" style="flex: 1;">Save Account</button>
-      </div>
-    </form>
-  </div>
-
-  <!-- CDN Info Card -->
-  <div class="clay-card">
-    <div class="clay-card-header">
-      <h3 class="clay-card-title">Hack Club CDN Limits</h3>
+        <div class="field">
+          <label for="provider">Provider</label>
+          <input type="text" id="provider" value="Hack Club CDN" readonly>
+        </div>
+        <div class="field">
+          <label for="apiKey">API key (bearer token)</label>
+          <input type="password" id="apiKey" placeholder="paste key…" required autocomplete="off">
+          <div class="help">Encrypted server-side. Only the last 4 characters are ever displayed.</div>
+        </div>
+        <button type="submit" class="btn primary" style="width: 100%;">Save account</button>
+      </form>
     </div>
-    <div style="font-size: 0.88rem; color: var(--color-muted); line-height: 1.6;">
-      <p style="margin-bottom: 0.75rem;"><strong>File Size Limit:</strong> 100 MB max per segment. Video segments are automatically split into 5-10 MB HLS chunks.</p>
-      <p style="margin-bottom: 0.75rem;"><strong>Storage Capacity:</strong> ~50 GB per CDN account.</p>
-      <p><strong>Multi-Account Support:</strong> Add multiple accounts (1, 2, 5, 10, 20+) to scale storage capacity dynamically.</p>
+  </div>
+  <div class="panel">
+    <div class="panel-head"><h2>Limits</h2></div>
+    <div class="panel-body">
+      <dl class="kv">
+        <dt>File size</dt><dd>100 MB max per object</dd>
+        <dt>Storage</dt><dd>~50 GB per account</dd>
+        <dt>Scaling</dt><dd>add accounts to grow capacity</dd>
+      </dl>
+      <p style="color: var(--muted); font-size: 12px;">Segments are split into 5–10 MB HLS chunks automatically, so long videos fit the per-file limit.</p>
     </div>
   </div>
 </div>
 
-<!-- CDN Accounts Table -->
-<div class="clay-card" style="margin-top: 1.5rem;">
-  <div class="clay-card-header">
-    <h3 class="clay-card-title">Configured CDN Accounts</h3>
-  </div>
-
+<div class="panel">
+  <div class="panel-head"><h2>Configured accounts</h2></div>
   {% if cdn_accounts %}
-  <div class="table-container">
-    <table class="clay-table">
-      <thead>
-        <tr>
-          <th>Name</th>
-          <th>Provider</th>
-          <th>API Key</th>
-          <th>Storage Used / Capacity</th>
-          <th>Status</th>
-          <th style="text-align: right;">Actions</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for acc in cdn_accounts %}
-        <tr>
-          <td style="font-weight: 600;">{{ acc.name }}</td>
-          <td>
-            <span class="badge badge-info">{{ acc.provider }}</span>
-          </td>
-          <td style="font-family: var(--font-mono); font-size: 0.82rem; color: var(--color-muted);">
-            {{ acc.masked_key }}
-          </td>
-          <td style="width: 200px;">
-            <div style="font-size: 0.8rem; margin-bottom: 0.2rem;">
-              {{ round(acc.storage.used_bytes / 1024 / 1024 / 1024, 2) }} GB / {{ round(acc.storage.total_bytes / 1024 / 1024 / 1024, 0) }} GB
-            </div>
-            <div class="progress-bar-container">
-              <div class="progress-bar-fill" style="width: {{ min(100.0, round((acc.storage.used_bytes / max(1, acc.storage.total_bytes)) * 100, 1)) }}%;"></div>
-            </div>
-          </td>
-          <td>
-            <span class="badge badge-success">Connected</span>
-          </td>
-          <td style="text-align: right;">
-            <div style="display: inline-flex; gap: 0.4rem;">
-              <button onclick="testConnection('{{ acc.id }}')" class="btn" style="padding: 0.35rem 0.65rem; font-size: 0.8rem;">
-                Test
-              </button>
-              <button onclick="deleteAccount('{{ acc.id }}', '{{ acc.name }}')" class="btn btn-danger" style="padding: 0.35rem 0.65rem; font-size: 0.8rem;">
-                Delete
-              </button>
-            </div>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
+  <table class="tbl">
+    <thead><tr><th>Name</th><th>Provider</th><th>Key</th><th>Storage</th><th>Freshness</th><th>Status</th><th class="r">Actions</th></tr></thead>
+    <tbody>
+      {% for acc in cdn_accounts %}
+      <tr>
+        <td><strong>{{ acc.name }}</strong></td>
+        <td>{{ acc.provider }}</td>
+        <td class="mono" style="color: var(--muted);">{{ acc.masked_key }}</td>
+        <td style="min-width: 170px;">
+          <span class="num">{{ round(acc.storage.used_bytes / 1024 / 1024 / 1024, 2) }} / {{ round(acc.storage.total_bytes / 1024 / 1024 / 1024, 0) }} GB</span>
+          <div class="bar thin"><div style="width: {{ min(100.0, round((acc.storage.used_bytes / max(1, acc.storage.total_bytes)) * 100, 1)) }}%;"></div></div>
+        </td>
+        <td>{% if acc.storage.live %}<span class="pill ok">live</span>{% else %}<span class="pill dim">local estimate</span>{% endif %}</td>
+        <td><span class="pill ok">enabled</span></td>
+        <td class="r">
+          <button type="button" class="btn" data-test-cdn="{{ acc.id }}">Test</button>
+          <button type="button" class="btn" data-refresh-cdn="{{ acc.id }}">Refresh</button>
+          <button type="button" class="btn danger" data-delete-cdn="{{ acc.id }}" data-cdn-name="{{ acc.name }}">Delete</button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
   {% else %}
-  <div style="text-align: center; padding: 2rem; color: var(--color-muted);">
-    No CDN accounts added yet. Add your Hack Club CDN API key above.
-  </div>
+  <div class="empty">No CDN accounts yet — add your Hack Club CDN API key above.</div>
   {% endif %}
 </div>
+{% endblock %}
 
+{% block scripts %}
 <script>
-  document.getElementById('addCdnForm').addEventListener('submit', async (e) => {
+(function () {
+  'use strict';
+
+  document.getElementById('addCdnForm').addEventListener('submit', function (e) {
     e.preventDefault();
-    const name = document.getElementById('accName').value.trim();
-    const provider = document.getElementById('provider').value.trim();
-    const apiKey = document.getElementById('apiKey').value.trim();
-
-    try {
-      const resp = await fetch('/api/cdn-accounts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, provider, api_key: apiKey })
-      });
-
-      const data = await resp.json();
-      if (resp.ok) {
-        alert(`CDN Account "${name}" saved and key encrypted successfully.`);
-        window.location.reload();
-      } else {
-        alert("Error: " + (data.error || "Failed to save CDN account"));
-      }
-    } catch (err) {
-      alert("Network error saving CDN account.");
-    }
+    var name = document.getElementById('accName').value.trim();
+    var provider = document.getElementById('provider').value.trim();
+    var apiKey = document.getElementById('apiKey').value.trim();
+    fetch('/api/cdn-accounts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, provider: provider, api_key: apiKey })
+    }).then(function (resp) {
+      return resp.json().then(function (data) { return { ok: resp.ok, data: data }; });
+    }).then(function (out) {
+      if (out.ok) { window.location.reload(); }
+      else HC.toast('error', 'Save failed', out.data.error || 'Could not save account.');
+    }).catch(function () {
+      HC.toast('error', 'Save failed', 'Network error saving account.');
+    });
   });
 
-  async function testConnection(id) {
-    try {
-      const resp = await fetch(`/api/cdn-accounts/${id}/test`, { method: 'POST' });
-      const data = await resp.json();
-      alert(`Test Result: ${data.message}`);
-    } catch (err) {
-      alert("Test connection failed.");
-    }
-  }
+  document.querySelectorAll('[data-test-cdn]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var id = btn.getAttribute('data-test-cdn');
+      btn.disabled = true;
+      fetch('/api/cdn-accounts/' + encodeURIComponent(id) + '/test', { method: 'POST' })
+        .then(function (resp) { return resp.json(); })
+        .then(function (data) {
+          HC.toast(data.success ? 'success' : 'error', 'Connection test', data.message || '');
+        })
+        .catch(function () { HC.toast('error', 'Connection test', 'Request failed.'); })
+        .finally(function () { btn.disabled = false; });
+    });
+  });
 
-  async function deleteAccount(id, name) {
-    if (!confirm(`Delete CDN account "${name}"?`)) return;
-    try {
-      const resp = await fetch(`/api/cdn-accounts/${id}`, { method: 'DELETE' });
-      if (resp.ok) {
-        window.location.reload();
-      }
-    } catch (err) {}
-  }
+  document.querySelectorAll('[data-refresh-cdn]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var id = btn.getAttribute('data-refresh-cdn');
+      btn.disabled = true;
+      fetch('/api/cdn-accounts/' + encodeURIComponent(id) + '/refresh-storage', { method: 'POST' })
+        .then(function (resp) { return resp.json().then(function (data) { return { ok: resp.ok, data: data }; }); })
+        .then(function (out) {
+          if (out.ok) window.location.reload();
+          else HC.toast('error', 'Refresh failed', out.data.message || 'CDN did not answer.');
+        })
+        .catch(function () { HC.toast('error', 'Refresh failed', 'Request failed.'); })
+        .finally(function () { btn.disabled = false; });
+    });
+  });
+
+  document.querySelectorAll('[data-delete-cdn]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var id = btn.getAttribute('data-delete-cdn');
+      var name = btn.getAttribute('data-cdn-name') || id;
+      if (!window.confirm('Delete CDN account "' + name + '"?')) return;
+      fetch('/api/cdn-accounts/' + encodeURIComponent(id), { method: 'DELETE' })
+        .then(function (resp) { if (resp.ok) window.location.reload(); })
+        .catch(function () { HC.toast('error', 'Delete failed', 'Request failed.'); });
+    });
+  });
+})();
 </script>
 {% endblock %}

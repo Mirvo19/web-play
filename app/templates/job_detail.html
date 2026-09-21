@@ -1,123 +1,98 @@
 {% extends "base.html" %}
 
-{% block title %}Job Logs — {{ job.id[:8] }}{% endblock %}
-{% block header_title %}Job Execution Logs{% endblock %}
+{% block title %}Job {{ job.id[:8] }} — HC CDN Player{% endblock %}
+{% block header_title %}Job <span class="mono">{{ job.id[:8] }}</span>{% endblock %}
+{% block header_sub %}{{ job.job_type }} · <span id="jobStatusLine">{{ job.status }}</span>{% endblock %}
 
 {% block content %}
-<div class="clay-card">
-  <div class="clay-card-header">
-    <div>
-      <h3 class="clay-card-title">Job #{{ job.id }}</h3>
-      <span style="font-size: 0.8rem; color: var(--color-muted);">Type: {{ job.job_type }} | Status: {{ job.status }}</span>
-    </div>
-    <div style="display: flex; gap: 0.75rem; align-items: center;">
-      {% if job.status in ['queued', 'processing'] %}
-      <button id="cancelJobBtn" class="btn btn-danger" onclick="cancelJob()">Cancel Job</button>
+<div class="panel">
+  <div class="panel-head">
+    <h2 id="jobStepLine">{{ job.current_step }}</h2>
+    <div class="btn-row">
+      {% if job.status in ('queued', 'processing', 'receiving') %}
+      <button type="button" id="cancelJobBtn" class="btn danger">Cancel job</button>
       {% endif %}
-      <a href="{{ url_for('views.jobs_list') }}" class="btn">Back to Jobs</a>
+      <a class="btn" href="{{ url_for('views.jobs_list') }}">Back to jobs</a>
     </div>
   </div>
-
-  <div style="margin-bottom: 1.5rem;">
-    <div style="display: flex; justify-content: space-between; font-weight: 600; font-size: 0.9rem; margin-bottom: 0.4rem;">
-      <span>{{ job.current_step }}</span>
-      <span>{{ round(job.progress, 1) }}%</span>
+  <div class="panel-body">
+    <div class="field">
+      <label>Progress <span class="num" id="jobPct">{{ round(job.progress, 1) }}%</span></label>
+      <div class="bar"><div id="jobBar" style="width: {{ job.progress }}%;"></div></div>
     </div>
-    <div class="progress-bar-container" style="height: 12px;">
-      <div class="progress-bar-fill" style="width: {{ job.progress }}%;"></div>
+    {% if job.error_message %}
+    <div class="alert bad" id="jobError">{{ job.error_message }}</div>
+    {% endif %}
+    <div class="field">
+      <label>Log stream (live)</label>
+      <div id="jobLog" class="logbox">Loading…</div>
     </div>
-  </div>
-
-  <label class="form-label">Verbose Real-time Log Stream</label>
-  <div id="jobDetailLogBox" class="log-console" style="max-height: 500px;">
-    {% for log in job.logs %}
-{{ log.message }}
-    {% endfor %}
   </div>
 </div>
+{% endblock %}
 
+{% block scripts %}
+<script id="job-bootstrap" type="application/json">{{ {'id': job.id}|tojson }}</script>
 <script>
-  const jobId = "{{ job.id }}";
-  const logsUrl = `/api/jobs/${encodeURIComponent(jobId)}/logs`;
-  const cancelUrl = `/api/jobs/${encodeURIComponent(jobId)}/cancel`;
-  let _jobDetailToastId = null;
+(function () {
+  'use strict';
+  var boot = JSON.parse(document.getElementById('job-bootstrap').textContent);
+  var jobId = boot.id;
+  var bar = document.getElementById('jobBar');
+  var pct = document.getElementById('jobPct');
+  var stepLine = document.getElementById('jobStepLine');
+  var statusLine = document.getElementById('jobStatusLine');
+  var logBox = document.getElementById('jobLog');
+  var cancelBtn = document.getElementById('cancelJobBtn');
+  var lastTs = null;
+  var done = false;
+  var accumulated = [];
 
-  async function cancelJob() {
-    const btn = document.getElementById('cancelJobBtn');
-    if (btn) btn.disabled = true;
-    try {
-      const resp = await fetch(cancelUrl, { method: 'POST' });
-      const data = await resp.json();
-      if (!resp.ok) {
-        showToast({ type: 'error', title: 'Cancel failed', message: data.error || 'Unable to cancel job' });
-        if (btn) btn.disabled = false;
-        return;
-      }
-      showToast({ type: 'warning', title: 'Cancellation requested', message: 'Stopping job execution.' });
-    } catch (e) {
-      showToast({ type: 'error', title: 'Cancel failed', message: 'Unable to reach cancel endpoint.' });
-      if (btn) btn.disabled = false;
-    }
+  if (cancelBtn) {
+    cancelBtn.addEventListener('click', function () {
+      cancelBtn.disabled = true;
+      fetch('/api/jobs/' + encodeURIComponent(jobId) + '/cancel', { method: 'POST' })
+        .then(function (resp) { return resp.json().then(function (data) { return { ok: resp.ok, data: data }; }); })
+        .then(function (out) {
+          if (out.ok) HC.toast('warn', 'Cancellation requested', 'Stopping job execution.');
+          else {
+            HC.toast('error', 'Cancel failed', out.data.error || 'Could not cancel job.');
+            cancelBtn.disabled = false;
+          }
+        })
+        .catch(function () {
+          HC.toast('error', 'Cancel failed', 'Could not reach cancel endpoint.');
+          cancelBtn.disabled = false;
+        });
+    });
   }
 
-  let _lastLogTimestamp = null;
-  let _accumulatedLogs = [];
-  let _jobDone = false;
-
-  // Append only NEW log lines from the API using the `since` query param
-  async function pollJobLogs() {
-    if (_jobDone) return;
-    try {
-      const url = _lastLogTimestamp
-        ? `${logsUrl}?since=${encodeURIComponent(_lastLogTimestamp)}`
-        : logsUrl;
-      const resp = await fetch(url);
-      if (!resp.ok) return;
-      const data = await resp.json();
-      const newLogs = data.logs;
-      const job = data.job;
-
-      // Accumulate new log messages
-      if (newLogs && newLogs.length > 0) {
-        _accumulatedLogs.push(...newLogs.map(l => l.message));
-        _lastLogTimestamp = newLogs[newLogs.length - 1].timestamp;
-        const logBox = document.getElementById('jobDetailLogBox');
-        logBox.textContent = _accumulatedLogs.join('\n');
+  HC.poll(function () {
+    if (done) return;
+    var url = '/api/jobs/' + encodeURIComponent(jobId) + '/logs' + (lastTs ? '?since=' + encodeURIComponent(lastTs) : '');
+    fetch(url).then(function (resp) {
+      if (!resp.ok) return null;
+      return resp.json();
+    }).then(function (data) {
+      if (!data) return;
+      if (data.logs && data.logs.length) {
+        data.logs.forEach(function (l) { accumulated.push(l.message); });
+        lastTs = data.logs[data.logs.length - 1].timestamp;
+        logBox.textContent = accumulated.join('\n');
         logBox.scrollTop = logBox.scrollHeight;
       }
-
-      // Update progress bar
+      var job = data.job;
       if (job) {
-        const progressBar = document.querySelector('.progress-bar-fill');
-        const stepLabel = document.querySelector('.progress-bar-container').previousElementSibling?.querySelector('span:first-child');
-        const pctLabel = document.querySelector('.progress-bar-container').previousElementSibling?.querySelector('span:last-child');
-        if (progressBar) progressBar.style.width = `${job.progress || 0}%`;
-        if (stepLabel) stepLabel.textContent = job.current_step || '';
-        if (pctLabel) pctLabel.textContent = `${Math.round(job.progress || 0)}%`;
-
-        if (job.status === 'processing') {
-          if (!_jobDetailToastId) _jobDetailToastId = showProgressToast({ title: 'Job running', message: job.current_step || 'Processing...', autoDismiss: false });
-          updateToastProgress(_jobDetailToastId, Math.round(job.progress || 0), job.current_step || 'Processing...');
-        } else if (job.status === 'completed') {
-          _jobDone = true;
-          showToast({ type: 'success', title: 'Job completed', message: 'Job finished successfully' });
-          if (_jobDetailToastId) closeToast(_jobDetailToastId);
-          _jobDetailToastId = null;
-        } else if (job.status === 'failed') {
-          _jobDone = true;
-          showToast({ type: 'error', title: 'Job failed', message: job.error_message || 'Job failed' });
-          if (_jobDetailToastId) closeToast(_jobDetailToastId);
-          _jobDetailToastId = null;
-        } else if (job.status === 'cancelled') {
-          _jobDone = true;
-          if (_jobDetailToastId) closeToast(_jobDetailToastId);
-          _jobDetailToastId = null;
-        }
+        bar.style.width = (job.progress || 0) + '%';
+        pct.textContent = Math.round(job.progress || 0) + '%';
+        stepLine.textContent = job.current_step || '';
+        statusLine.textContent = job.status || '';
+        if (job.status === 'completed') { done = true; HC.toast('success', 'Job completed', 'Finished successfully.'); }
+        else if (job.status === 'failed') { done = true; HC.toast('error', 'Job failed', job.error_message || 'Job failed.'); }
+        else if (job.status === 'cancelled') { done = true; HC.toast('warn', 'Job cancelled', 'Processing was cancelled.'); }
       }
-    } catch (e) {}
-  }
-
-  setInterval(pollJobLogs, 2000);
-
+    }).catch(function () { /* transient */ });
+  }, 2000);
+})();
 </script>
 {% endblock %}

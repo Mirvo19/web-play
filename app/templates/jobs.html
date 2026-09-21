@@ -1,104 +1,109 @@
 {% extends "base.html" %}
 
-{% block title %}Active Jobs — Video Infrastructure Platform{% endblock %}
-{% block header_title %}Transcoding & Deletion Jobs{% endblock %}
+{% block title %}Jobs — HC CDN Player{% endblock %}
+{% block header_title %}Jobs{% endblock %}
+{% block header_sub %}{{ jobs|length }} total · live status refreshes every 2s{% endblock %}
 
 {% block content %}
-<div class="clay-card">
-  <div class="clay-card-header">
-    <h3 class="clay-card-title">Job Execution Queue</h3>
-  </div>
-
+<div class="panel">
+  <div class="panel-head"><h2>Queue</h2></div>
   {% if jobs %}
-  <div class="table-container">
-    <table class="clay-table">
-      <thead>
-        <tr>
-          <th>Job ID</th>
-          <th>Type</th>
-          <th>Progress</th>
-          <th>Current Step</th>
-          <th>Status</th>
-          <th>Started</th>
-          <th style="text-align: right;">Action</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for job in jobs %}
-        <tr>
-          <td style="font-family: var(--font-mono); font-size: 0.8rem;">{{ job.id[:8] }}...</td>
-          <td style="font-weight: 600;">
-            {% if job.job_type == 'transcode_and_upload' %}
-              Transcode & CDN Upload
-            {% else %}
-              Video Deletion
-            {% endif %}
-          </td>
-          <td style="width: 180px;">
-            <div style="font-size: 0.8rem; font-weight: 600; margin-bottom: 0.2rem;">{{ round(job.progress, 1) }}%</div>
-            <div class="progress-bar-container">
-              <div class="progress-bar-fill" style="width: {{ job.progress }}%;"></div>
-            </div>
-          </td>
-          <td style="font-size: 0.85rem; color: var(--color-muted);">
-            <div>{{ job.current_step }}</div>
-            <div style="font-size: 0.78rem; margin-top: 0.25rem; color: var(--color-text);">{{ job.current_message }}</div>
-          </td>
-          <td>
-            {% if job.status == 'completed' %}
-              <span class="badge badge-success">Completed</span>
-            {% elif job.status == 'processing' %}
-              <span class="badge badge-warning">Processing</span>
-            {% elif job.status == 'queued' %}
-              <span class="badge badge-info">Queued</span>
-            {% elif job.status == 'cancelled' %}
-              <span class="badge badge-secondary">Cancelled</span>
-            {% else %}
-              <span class="badge badge-danger">Failed</span>
-            {% endif %}
-          </td>
-          <td style="font-size: 0.8rem; color: var(--color-muted);">
-            {{ job.created_at.strftime('%H:%M:%S') if job.created_at else '' }}
-          </td>
-          <td style="text-align: right;">
-            <a href="{{ url_for('views.job_detail', job_id=job.id) }}" class="btn" style="padding: 0.35rem 0.7rem; font-size: 0.8rem;">
-              View Logs
-            </a>
-            {% if job.status in ['queued', 'processing'] %}
-            <button type="button" class="btn btn-danger" style="padding: 0.35rem 0.7rem; font-size: 0.8rem; margin-left: 0.25rem;" onclick="cancelJob('{{ job.id }}', this)">
-              Cancel
-            </button>
-            {% endif %}
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
+  <table class="tbl" id="jobsTable">
+    <thead><tr><th>Job</th><th>Type</th><th>Status</th><th>Progress</th><th>Step</th><th>Started</th><th class="r">Actions</th></tr></thead>
+    <tbody>
+      {% for job in jobs %}
+      <tr data-job-row="{{ job.id }}">
+        <td class="mono">{{ job.id[:8] }}</td>
+        <td>{% if job.job_type == 'transcode_and_upload' %}transcode+upload{% else %}deletion{% endif %}</td>
+        <td data-cell="status">
+          {% if job.status == 'completed' %}<span class="pill ok">completed</span>
+          {% elif job.status == 'processing' %}<span class="pill warn">processing</span>
+          {% elif job.status == 'queued' %}<span class="pill info">queued</span>
+          {% elif job.status == 'cancelled' %}<span class="pill dim">cancelled</span>
+          {% else %}<span class="pill bad">failed</span>{% endif %}
+        </td>
+        <td style="min-width: 130px;" data-cell="progress">
+          <div class="bar thin"><div style="width: {{ job.progress }}%;"></div></div>
+          <span class="num">{{ round(job.progress, 1) }}%</span>
+        </td>
+        <td data-cell="step">{{ job.current_step }}</td>
+        <td class="num">{{ job.created_at.strftime('%H:%M:%S') if job.created_at else '' }}</td>
+        <td class="r">
+          <a class="btn" href="{{ url_for('views.job_detail', job_id=job.id) }}">Logs</a>
+          {% if job.status in ('queued', 'processing', 'receiving') %}
+          <button type="button" class="btn danger" data-cancel-job="{{ job.id }}">Cancel</button>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
   {% else %}
-  <div style="text-align: center; padding: 2rem; color: var(--color-muted);">
-    No background processing jobs recorded yet.
-  </div>
+  <div class="empty">No jobs recorded yet.</div>
   {% endif %}
 </div>
+{% endblock %}
 
+{% block scripts %}
 <script>
-  async function cancelJob(jobId, button) {
-    if (button) button.disabled = true;
-    try {
-      const resp = await fetch(`/api/jobs/${jobId}/cancel`, { method: 'POST' });
-      const data = await resp.json();
-      if (!resp.ok) {
-        showToast({ type: 'error', title: 'Cancel failed', message: data.error || 'Unable to cancel job' });
-        if (button) button.disabled = false;
-        return;
-      }
-      showToast({ type: 'warning', title: 'Cancellation requested', message: 'Job cancellation is being processed.' });
-      setTimeout(() => window.location.reload(), 1500);
-    } catch (e) {
-      showToast({ type: 'error', title: 'Cancel failed', message: 'Unable to reach cancel endpoint.' });
-      if (button) button.disabled = false;
-    }
-  }
+(function () {
+  'use strict';
+
+  document.querySelectorAll('[data-cancel-job]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var id = btn.getAttribute('data-cancel-job');
+      btn.disabled = true;
+      fetch('/api/jobs/' + encodeURIComponent(id) + '/cancel', { method: 'POST' })
+        .then(function (resp) { return resp.json().then(function (data) { return { ok: resp.ok, data: data }; }); })
+        .then(function (out) {
+          if (out.ok) {
+            HC.toast('warn', 'Cancellation requested', 'Job cancellation is being processed.');
+            setTimeout(function () { window.location.reload(); }, 1500);
+          } else {
+            HC.toast('error', 'Cancel failed', out.data.error || 'Could not cancel job.');
+            btn.disabled = false;
+          }
+        })
+        .catch(function () {
+          HC.toast('error', 'Cancel failed', 'Could not reach cancel endpoint.');
+          btn.disabled = false;
+        });
+    });
+  });
+
+  // Live status: refresh rows in place every 2s without a full reload.
+  var rows = document.querySelectorAll('[data-job-row]');
+  if (!rows.length) return;
+  HC.poll(function () {
+    rows.forEach(function (row) {
+      var id = row.getAttribute('data-job-row');
+      fetch('/api/jobs/' + encodeURIComponent(id)).then(function (resp) {
+        if (!resp.ok) return null;
+        return resp.json();
+      }).then(function (job) {
+        if (!job) return;
+        var statusCell = row.querySelector('[data-cell="status"]');
+        var pill = statusCell && statusCell.querySelector('.pill');
+        if (pill) {
+          pill.textContent = job.status;
+          pill.className = 'pill ' + (
+            job.status === 'completed' ? 'ok' :
+            job.status === 'processing' ? 'warn' :
+            job.status === 'queued' ? 'info' :
+            job.status === 'failed' ? 'bad' : 'dim');
+        }
+        var progCell = row.querySelector('[data-cell="progress"]');
+        if (progCell) {
+          var fill = progCell.querySelector('.bar > div');
+          var num = progCell.querySelector('.num');
+          if (fill) fill.style.width = (job.progress || 0) + '%';
+          if (num) num.textContent = Math.round(job.progress || 0) + '%';
+        }
+        var stepCell = row.querySelector('[data-cell="step"]');
+        if (stepCell) stepCell.textContent = job.current_step || '';
+      }).catch(function () { /* transient */ });
+    });
+  }, 2000);
+})();
 </script>
 {% endblock %}

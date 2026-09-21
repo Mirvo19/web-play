@@ -1,320 +1,266 @@
 {% extends "base.html" %}
 
-{% block title %}Upload Video — Video Infrastructure Platform{% endblock %}
-{% block header_title %}Transcode & Upload Video to CDN{% endblock %}
+{% block title %}Upload — HC CDN Player{% endblock %}
+{% block header_title %}Upload{% endblock %}
+{% block header_sub %}stream to server → transcode → CDN{% endblock %}
 
 {% block content %}
-<div class="grid-2">
-  <!-- Upload Form -->
-  <div class="clay-card">
-    <div class="clay-card-header">
-      <h3 class="clay-card-title">Upload Video File</h3>
-    </div>
-
-    <form id="uploadForm">
-      <div class="form-group">
-        <label class="form-label" for="videoFile">Video File (MP4, MKV, MOV, AVI)</label>
-        <input type="file" id="videoFile" class="form-control" accept="video/*" required>
-        <div style="font-size: 0.78rem; color: var(--color-muted); margin-top: 0.3rem;">
-          Streamed directly to server disk. Max per CDN file segment: 100 MB.
+<div class="grid grid-2">
+  <div class="panel">
+    <div class="panel-head"><h2>Source file</h2></div>
+    <div class="panel-body">
+      <form id="uploadForm">
+        <div class="field">
+          <label for="videoFile">Video file (mp4, mkv, mov, avi)</label>
+          <input type="file" id="videoFile" accept="video/*" required>
+          <div class="help">Streamed to server disk in chunks. Per-file CDN limit: 100 MB per segment (HLS chunks are split automatically).</div>
         </div>
-      </div>
-
-      <div class="form-group">
-        <label class="form-label" for="title">Title</label>
-        <input type="text" id="title" class="form-control" placeholder="My Video Title" required>
-      </div>
-
-      <div class="form-group">
-        <label class="form-label" for="description">Description (Optional)</label>
-        <textarea id="description" class="form-control" rows="3" placeholder="Video description..."></textarea>
-      </div>
-
-      <div class="form-group">
-        <label class="form-label" for="cdnSelect">Upload to CDN Account (Manual Selection)</label>
-        <select id="cdnSelect" class="form-select" required>
-          {% if cdn_accounts %}
-            {% for acc in cdn_accounts %}
-              <option value="{{ acc.id }}">
-                {{ acc.name }} — {{ round(acc.storage.available_bytes / 1024 / 1024 / 1024, 1) }} GB free
-              </option>
-            {% endfor %}
-          {% else %}
-            <option value="" disabled selected>No CDN Accounts Configured! Please add one in CDN Accounts.</option>
-          {% endif %}
-        </select>
-      </div>
-
-      <div style="display: flex; gap: 0.75rem; margin-top: 1rem;">
-        <button type="submit" id="startUploadBtn" class="btn btn-primary" style="flex: 1;" {% if not cdn_accounts %}disabled{% endif %}>
-          Start Upload & Processing
-        </button>
-        <button type="button" id="cancelUploadBtn" class="btn btn-danger" style="flex: 1;" disabled onclick="cancelCurrentJob()">
-          Cancel Job
-        </button>
-      </div>
-    </form>
+        <div class="field">
+          <label for="title">Title</label>
+          <input type="text" id="title" placeholder="My video title" required>
+        </div>
+        <div class="field">
+          <label for="description">Description (optional)</label>
+          <textarea id="description" rows="3" placeholder="Video description..."></textarea>
+        </div>
+        <div class="field">
+          <label for="cdnSelect">CDN account</label>
+          <select id="cdnSelect" required>
+            {% if cdn_accounts %}
+              {% for acc in cdn_accounts %}
+                <option value="{{ acc.id }}">{{ acc.name }} — {{ round(acc.storage.available_bytes / 1024 / 1024 / 1024, 1) }} GB free</option>
+              {% endfor %}
+            {% else %}
+              <option value="" disabled selected>No CDN accounts — add one under CDN first.</option>
+            {% endif %}
+          </select>
+        </div>
+        <div class="btn-row">
+          <button type="submit" id="startUploadBtn" class="btn primary" style="flex:1;" {% if not cdn_accounts %}disabled{% endif %}>Start upload</button>
+          <button type="button" id="cancelUploadBtn" class="btn danger" style="flex:1;" disabled>Cancel job</button>
+        </div>
+      </form>
+    </div>
   </div>
 
-  <!-- Live Status -->
-  <div class="clay-card">
-    <div class="clay-card-header">
-      <h3 class="clay-card-title">Pipeline & Live Logs</h3>
-    </div>
-
-    <div id="pipelineContainer" style="display: none;">
-
-      <!-- Bar 1: Upload to server (owned by XHR onprogress only) -->
-      <div style="margin-bottom: 1.25rem;">
-        <div style="display: flex; justify-content: space-between; font-size: 0.82rem; color: var(--color-muted); margin-bottom: 0.35rem;">
-          <span>Upload to server</span>
-          <span id="uploadBar1Detail">—</span>
-        </div>
-        <div class="progress-bar-container">
-          <div id="uploadBar1" class="progress-bar-fill" style="width: 0%;"></div>
-        </div>
+  <div class="panel">
+    <div class="panel-head"><h2>Progress</h2><span class="pill dim" id="jobStatePill">idle</span></div>
+    <div class="panel-body">
+      <div class="field">
+        <label>1 · Upload to server <span class="num" id="uploadDetail">—</span></label>
+        <div class="bar"><div id="uploadBar"></div></div>
       </div>
-
-      <!-- Bar 2: Server-side processing (owned by job polling only) -->
-      <div style="margin-bottom: 1.25rem;">
-        <div style="display: flex; justify-content: space-between; font-size: 0.82rem; color: var(--color-muted); margin-bottom: 0.35rem;">
-          <span id="processingBarLabel">Processing pipeline</span>
-          <span id="processingBarDetail">Waiting for upload...</span>
-        </div>
-        <div class="progress-bar-container">
-          <div id="processingBar" class="progress-bar-fill" style="width: 0%; background: var(--color-accent-secondary, #a78bfa);"></div>
-        </div>
+      <div class="field">
+        <label>2 · Transcode + CDN <span class="num" id="procDetail">waiting for upload…</span></label>
+        <div class="bar"><div id="procBar"></div></div>
+        <div class="help" id="procStep">—</div>
       </div>
-
-    </div>
-
-    <label class="form-label">Real-time Terminal Logs</label>
-    <div id="logConsole" class="log-console">
-Ready to accept video upload stream...
+      <div class="field">
+        <label>Job log</label>
+        <div id="logConsole" class="logbox">Ready. Select a file and start the upload.</div>
+      </div>
     </div>
   </div>
 </div>
+{% endblock %}
 
+{% block scripts %}
 <script>
-  let activeJobId = null;
-  let logPollInterval = null;
-  let uploadToastId = null;
-  let currentUploadXhr = null;
+(function () {
+  'use strict';
+  var activeJobId = null;
+  var pollStop = null;
+  var xhr = null;
 
-  // Resume polling if an active job exists in localStorage
-  window.addEventListener('load', () => {
-    const stored = localStorage.getItem('hc_active_job_id');
-    if (stored) {
-      activeJobId = stored;
-      document.getElementById('pipelineContainer').style.display = 'block';
-      document.getElementById('cancelUploadBtn').disabled = false;
-      startLogPolling(activeJobId);
-    }
-  });
+  var startBtn = document.getElementById('startUploadBtn');
+  var cancelBtn = document.getElementById('cancelUploadBtn');
+  var uploadBar = document.getElementById('uploadBar');
+  var uploadDetail = document.getElementById('uploadDetail');
+  var procBar = document.getElementById('procBar');
+  var procDetail = document.getElementById('procDetail');
+  var procStep = document.getElementById('procStep');
+  var pill = document.getElementById('jobStatePill');
+  var logBox = document.getElementById('logConsole');
 
-  document.getElementById('uploadForm').addEventListener('submit', async (e) => {
-    e.preventDefault();
+  function setPill(text, cls) {
+    pill.textContent = text;
+    pill.className = 'pill ' + (cls || 'dim');
+  }
 
-    const fileInput = document.getElementById('videoFile');
-    if (!fileInput.files.length) return;
+  function appendLogs(lines) {
+    logBox.textContent = lines.join('\n');
+    logBox.scrollTop = logBox.scrollHeight;
+  }
 
-    const file = fileInput.files[0];
-    const title = document.getElementById('title').value.trim() || file.name;
-    const description = document.getElementById('description').value.trim();
-    const cdnAccountId = document.getElementById('cdnSelect').value;
-
-    const btn = document.getElementById('startUploadBtn');
-    const cancelBtn = document.getElementById('cancelUploadBtn');
-    btn.disabled = true;
-    btn.textContent = 'Uploading... 0%';
+  // Resume polling a job left running (e.g. after page reload).
+  var stored = null;
+  try { stored = localStorage.getItem('hc_active_job_id'); } catch (e) { stored = null; }
+  if (stored) {
+    activeJobId = stored;
     cancelBtn.disabled = false;
-    document.getElementById('pipelineContainer').style.display = 'block';
+    startPolling(activeJobId);
+  }
 
-    try {
-      const initForm = new FormData();
-      initForm.append('title', title);
-      initForm.append('description', description);
-      initForm.append('cdn_account_id', cdnAccountId);
-      initForm.append('filename', file.name);
+  document.getElementById('uploadForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var fileInput = document.getElementById('videoFile');
+    if (!fileInput.files.length) return;
+    var file = fileInput.files[0];
+    var title = document.getElementById('title').value.trim() || file.name;
+    var description = document.getElementById('description').value.trim();
+    var cdnAccountId = document.getElementById('cdnSelect').value;
 
-      const initResp = await fetch('/api/videos/upload/init', {
-        method: 'POST',
-        body: initForm
-      });
-      const initData = await initResp.json();
-      if (!initResp.ok) {
-        showToast({ type: 'error', title: 'Upload init failed', message: initData.error || initData.message || 'Unable to initialize upload' });
-        btn.disabled = false;
-        btn.textContent = 'Start Upload & Processing';
-        cancelBtn.disabled = true;
-        return;
-      }
+    startBtn.disabled = true;
+    startBtn.textContent = 'Uploading… 0%';
+    cancelBtn.disabled = false;
 
-      activeJobId = initData.job_id;
-      localStorage.setItem('hc_active_job_id', activeJobId);
-      startLogPolling(activeJobId);
+    var initForm = new FormData();
+    initForm.append('title', title);
+    initForm.append('description', description);
+    initForm.append('cdn_account_id', cdnAccountId);
+    initForm.append('filename', file.name);
+    initForm.append('size', String(file.size));
 
-      currentUploadXhr = new XMLHttpRequest();
-      currentUploadXhr.open('PUT', initData.upload_url, true);
-
-      uploadToastId = showProgressToast({ title: 'Uploading source', message: 'Starting upload...', autoDismiss: false });
-
-      // ── Bar 1 owner: XHR onprogress ──────────────────────────────────────
-      currentUploadXhr.upload.onprogress = function(ev) {
-        if (ev.lengthComputable) {
-          const pct      = Math.round((ev.loaded / ev.total) * 100);
-          const loadedMB = (ev.loaded / 1024 / 1024).toFixed(0);
-          const totalMB  = (ev.total  / 1024 / 1024).toFixed(0);
-          document.getElementById('uploadBar1').style.width = pct + '%';
-          document.getElementById('uploadBar1Detail').textContent = `${loadedMB} MB / ${totalMB} MB`;
-          btn.textContent = `Uploading... ${pct}%`;
-          updateToastProgress(uploadToastId, pct, `${loadedMB} MB / ${totalMB} MB`);
-        } else {
-          document.getElementById('uploadBar1Detail').textContent = 'Sending...';
-        }
-      };
-
-      currentUploadXhr.onload = function() {
-        if (currentUploadXhr.status >= 200 && currentUploadXhr.status < 300) {
-          document.getElementById('uploadBar1').style.width = '100%';
-          document.getElementById('uploadBar1Detail').textContent = 'Complete';
-          btn.textContent = 'Upload complete — queued for processing';
-          btn.disabled = true;
-          updateToastProgress(uploadToastId, 100, 'Upload complete — queued for processing');
-          // Toast stays open — polling loop will update it through processing
-        } else {
-          showToast({ type: 'error', title: 'Upload failed', message: currentUploadXhr.responseText || 'Upload error' });
-          closeToast(uploadToastId);
-          btn.disabled = false;
-          btn.textContent = 'Start Upload & Processing';
+    fetch('/api/videos/upload/init', { method: 'POST', body: initForm })
+      .then(function (resp) { return resp.json().then(function (data) { return { resp: resp, data: data }; }); })
+      .then(function (out) {
+        if (!out.resp.ok) {
+          HC.toast('error', 'Upload init failed', out.data.error || 'Could not initialize upload.');
+          startBtn.disabled = false;
+          startBtn.textContent = 'Start upload';
           cancelBtn.disabled = true;
-          localStorage.removeItem('hc_active_job_id');
+          return;
         }
-      };
-
-      currentUploadXhr.onerror = function() {
-        showToast({ type: 'error', title: 'Network error', message: 'Network error during upload' });
-        closeToast(uploadToastId);
-        btn.disabled = false;
-        btn.textContent = 'Start Upload & Processing';
+        activeJobId = out.data.job_id;
+        try { localStorage.setItem('hc_active_job_id', activeJobId); } catch (e) { /* ignore */ }
+        startPolling(activeJobId);
+        sendFile(out.data.upload_url, file);
+      })
+      .catch(function () {
+        HC.toast('error', 'Upload failed', 'Network error initializing upload.');
+        startBtn.disabled = false;
+        startBtn.textContent = 'Start upload';
         cancelBtn.disabled = true;
-        localStorage.removeItem('hc_active_job_id');
-      };
-
-      currentUploadXhr.send(file);
-
-    } catch (err) {
-      showToast({ type: 'error', title: 'Upload error', message: 'Network error streaming file upload.' });
-      btn.disabled = false;
-      btn.textContent = 'Start Upload & Processing';
-      document.getElementById('cancelUploadBtn').disabled = true;
-      localStorage.removeItem('hc_active_job_id');
-    }
+      });
   });
 
-  function cancelCurrentJob() {
-    if (currentUploadXhr) currentUploadXhr.abort();
-    if (!activeJobId) return;
-    const cancelBtn = document.getElementById('cancelUploadBtn');
+  function sendFile(url, file) {
+    xhr = new XMLHttpRequest();
+    xhr.open('PUT', url, true);
+    xhr.upload.onprogress = function (ev) {
+      if (ev.lengthComputable) {
+        var pct = Math.round((ev.loaded / ev.total) * 100);
+        uploadBar.style.width = pct + '%';
+        uploadDetail.textContent = (ev.loaded / 1048576).toFixed(0) + ' / ' + (ev.total / 1048576).toFixed(0) + ' MB';
+        startBtn.textContent = 'Uploading… ' + pct + '%';
+      } else {
+        uploadDetail.textContent = 'sending…';
+      }
+    };
+    xhr.onload = function () {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        uploadBar.style.width = '100%';
+        uploadDetail.textContent = 'complete';
+        startBtn.textContent = 'Upload complete — queued';
+      } else {
+        HC.toast('error', 'Upload failed', xhr.responseText || 'Upload error.');
+        resetForm('Start upload');
+      }
+    };
+    xhr.onerror = function () {
+      HC.toast('error', 'Upload failed', 'Network error during upload.');
+      resetForm('Start upload');
+    };
+    xhr.send(file);
+  }
+
+  function resetForm(label) {
+    startBtn.disabled = false;
+    startBtn.textContent = label;
     cancelBtn.disabled = true;
-    fetch(`/api/jobs/${activeJobId}/cancel`, { method: 'POST' })
-      .then(res => res.json())
-      .then(data => {
+    try { localStorage.removeItem('hc_active_job_id'); } catch (e) { /* ignore */ }
+    activeJobId = null;
+  }
+
+  cancelBtn.addEventListener('click', function () {
+    if (xhr) { try { xhr.abort(); } catch (e) { /* ignore */ } xhr = null; }
+    if (!activeJobId) return;
+    cancelBtn.disabled = true;
+    fetch('/api/jobs/' + encodeURIComponent(activeJobId) + '/cancel', { method: 'POST' })
+      .then(function (resp) { return resp.json(); })
+      .then(function (data) {
         if (data.error) {
-          showToast({ type: 'error', title: 'Cancel failed', message: data.error });
+          HC.toast('error', 'Cancel failed', data.error);
           cancelBtn.disabled = false;
         } else {
-          showToast({ type: 'warning', title: 'Cancellation requested', message: 'Attempting to stop processing.' });
+          HC.toast('warn', 'Cancellation requested', 'Stopping job execution.');
         }
       })
-      .catch(() => {
-        showToast({ type: 'error', title: 'Cancel failed', message: 'Unable to reach cancel endpoint.' });
+      .catch(function () {
+        HC.toast('error', 'Cancel failed', 'Could not reach cancel endpoint.');
         cancelBtn.disabled = false;
       });
+  });
+
+  function startPolling(jobId) {
+    if (pollStop) pollStop();
+    pollStop = HC.poll(function () { refreshJob(jobId); }, 1500);
   }
 
-  // ── Bar 2 owner: job polling ────────────────────────────────────────────
-  function startLogPolling(jobId) {
-    if (logPollInterval) clearInterval(logPollInterval);
-
-    logPollInterval = setInterval(async () => {
-      try {
-        const resp = await fetch(`/api/jobs/${jobId}`);
-        if (!resp.ok) return;
-        const job = await resp.json();
-
-        const procBar    = document.getElementById('processingBar');
-        const procLabel  = document.getElementById('processingBarLabel');
-        const procDetail = document.getElementById('processingBarDetail');
-        const btn        = document.getElementById('startUploadBtn');
-        const cancelBtn  = document.getElementById('cancelUploadBtn');
-
-        if (job.status === 'receiving') {
-          procBar.style.width = '0%';
-          procLabel.textContent = 'Processing pipeline';
-          procDetail.textContent = 'Waiting for upload...';
-          btn.disabled = true;
-          cancelBtn.disabled = false;
-        } else if (job.status === 'queued') {
-          procBar.style.width = '5%';
-          procLabel.textContent = 'Processing pipeline';
-          procDetail.textContent = 'Queued — waiting for worker';
-          btn.textContent = 'Queued for processing';
-          btn.disabled = true;
-          cancelBtn.disabled = false;
-          if (uploadToastId) updateToastProgress(uploadToastId, 100, 'Queued — waiting for worker...');
-        } else if (job.status === 'processing') {
-          procBar.style.width = `${job.progress}%`;
-          procLabel.textContent = job.current_step || 'Processing...';
-          procDetail.textContent = `${Math.round(job.progress)}%`;
-          btn.textContent = job.current_step || 'Processing...';
-          btn.disabled = true;
-          cancelBtn.disabled = false;
-          if (uploadToastId) updateToastProgress(uploadToastId, Math.round(job.progress), job.current_step || 'Processing...');
-        } else if (job.status === 'completed') {
-          procBar.style.width = '100%';
-          procLabel.textContent = 'Completed ✓';
-          procDetail.textContent = '100%';
-          btn.textContent = 'Completed ✓';
-          btn.disabled = false;
-          cancelBtn.disabled = true;
-          showToast({ type: 'success', title: 'Job completed', message: 'Processing finished successfully' });
-          if (uploadToastId) closeToast(uploadToastId);
-          clearInterval(logPollInterval);
-          localStorage.removeItem('hc_active_job_id');
-        } else if (job.status === 'failed') {
-          procLabel.textContent = 'Failed';
-          procDetail.textContent = job.error_message || 'Error';
-          btn.textContent = 'Processing Failed';
-          btn.disabled = false;
-          cancelBtn.disabled = true;
-          showToast({ type: 'error', title: 'Job failed', message: job.error_message || 'Processing failed' });
-          if (uploadToastId) closeToast(uploadToastId);
-          clearInterval(logPollInterval);
-          localStorage.removeItem('hc_active_job_id');
-        } else if (job.status === 'cancelled') {
-          procLabel.textContent = 'Cancelled';
-          procDetail.textContent = '—';
-          btn.textContent = 'Cancelled';
-          btn.disabled = false;
-          cancelBtn.disabled = true;
-          showToast({ type: 'warning', title: 'Job cancelled', message: 'Processing was cancelled.' });
-          if (uploadToastId) closeToast(uploadToastId);
-          clearInterval(logPollInterval);
-          localStorage.removeItem('hc_active_job_id');
-        }
-
-        // Logs only — never touches either progress bar
-        const logsResp = await fetch(`/api/jobs/${jobId}/logs`);
-        if (!logsResp.ok) return;
-        const data = await logsResp.json();
-        const logBox = document.getElementById('logConsole');
-        logBox.textContent = data.logs.map(l => l.message).join('\n');
-        logBox.scrollTop = logBox.scrollHeight;
-      } catch (e) {
-        console.error('Log fetch error:', e);
+  function refreshJob(jobId) {
+    fetch('/api/jobs/' + encodeURIComponent(jobId)).then(function (resp) {
+      if (!resp.ok) return null;
+      return resp.json();
+    }).then(function (job) {
+      if (!job) return;
+      var pct = Math.round(job.progress || 0);
+      if (job.status === 'receiving') {
+        setPill('receiving', 'info');
+        procDetail.textContent = 'waiting for upload…';
+      } else if (job.status === 'queued') {
+        setPill('queued', 'info');
+        procBar.style.width = '5%';
+        procDetail.textContent = 'queued — waiting for worker';
+        procStep.textContent = job.current_message || '';
+        startBtn.textContent = 'Queued for processing';
+      } else if (job.status === 'processing') {
+        setPill('processing', 'warn');
+        procBar.style.width = pct + '%';
+        procDetail.textContent = pct + '%';
+        procStep.textContent = (job.current_step || '') + (job.current_message ? ' — ' + job.current_message : '');
+        startBtn.textContent = job.current_step || 'Processing…';
+      } else if (job.status === 'completed') {
+        setPill('done', 'ok');
+        procBar.style.width = '100%';
+        procDetail.textContent = '100%';
+        procStep.textContent = 'Complete.';
+        HC.toast('success', 'Job completed', 'Video is ready to watch.');
+        finish();
+      } else if (job.status === 'failed') {
+        setPill('failed', 'bad');
+        procStep.textContent = job.error_message || 'Error.';
+        HC.toast('error', 'Job failed', job.error_message || 'Processing failed.');
+        finish();
+      } else if (job.status === 'cancelled') {
+        setPill('cancelled', 'dim');
+        procStep.textContent = 'Cancelled.';
+        HC.toast('warn', 'Job cancelled', 'Processing was cancelled.');
+        finish();
       }
-    }, 1000);
+    }).catch(function () { /* transient; next tick retries */ });
+
+    fetch('/api/jobs/' + encodeURIComponent(jobId) + '/logs').then(function (resp) {
+      if (!resp.ok) return null;
+      return resp.json();
+    }).then(function (data) {
+      if (data && data.logs) appendLogs(data.logs.map(function (l) { return l.message; }));
+    }).catch(function () { /* transient */ });
   }
+
+  function finish() {
+    if (pollStop) { pollStop(); pollStop = null; }
+    resetForm('Start new upload');
+  }
+})();
 </script>
 {% endblock %}
