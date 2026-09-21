@@ -216,6 +216,8 @@
       foot.appendChild(accSel);
       var start = HC.el('button', { type: 'button', className: 'btn primary', 'data-t-start': t.id }, 'Download selected');
       foot.appendChild(start);
+      var purgeBtn = HC.el('button', { type: 'button', className: 'btn danger', 'data-t-purge': t.id }, 'Purge');
+      foot.appendChild(purgeBtn);
       body.appendChild(foot);
     } else if (t.state === 'downloading' || t.state === 'validating') {
       var pct = (t.progress && t.progress.pct) || 0;
@@ -263,14 +265,20 @@
         line.appendChild(HC.el('a', { href: '/jobs/' + encodeURIComponent(h.job_id || '') }, 'job ' + (h.job_id || '').slice(0, 8)));
         body.appendChild(line);
       });
-    } else if (t.state === 'failed') {
-      var bad = HC.el('div', { className: 'alert bad' });
-      bad.textContent = t.error_message || 'Failed.';
-      body.appendChild(bad);
+    } else if (t.state === 'failed' || t.state === 'cancelled') {
+      if (t.state === 'failed') {
+        var bad = HC.el('div', { className: 'alert bad' });
+        bad.textContent = t.error_message || 'Failed.';
+        body.appendChild(bad);
+      } else {
+        body.appendChild(HC.el('div', { className: 'empty' }, 'Cancelled — quarantine wiped.'));
+      }
+      var actions = HC.el('div', { className: 'btn-row' });
+      actions.style.marginTop = '8px';
+      actions.appendChild(HC.el('button', { type: 'button', className: 'btn primary', 'data-t-retry': t.id }, 'Retry'));
+      actions.appendChild(HC.el('button', { type: 'button', className: 'btn danger', 'data-t-purge': t.id }, 'Purge'));
+      body.appendChild(actions);
       body.appendChild(engineLogSection(t.id));
-    } else if (t.state === 'cancelled') {
-      body.appendChild(HC.el('div', { className: 'empty' }, 'Cancelled — quarantine wiped.'));
-    }
     card.appendChild(body);
     return card;
   }
@@ -408,6 +416,49 @@
         box.textContent = 'Loading engine log…';
         fetchLogTail(lid, box, false);
       }
+      return;
+    }
+    var retryBtn = e.target.closest ? e.target.closest('[data-t-retry]') : null;
+    if (retryBtn) {
+      var rid = retryBtn.getAttribute('data-t-retry');
+      retryBtn.disabled = true;
+      fetch('/api/torrents/' + encodeURIComponent(rid) + '/retry', { method: 'POST' })
+        .then(function (resp) { return resp.json().then(function (data) { return { ok: resp.ok, data: data }; }); })
+        .then(function (out) {
+          if (out.ok) {
+            HC.toast('success', 'Retry queued', 'Fetching metadata again.');
+            refresh();
+          } else {
+            HC.toast('error', 'Retry refused', out.data.error || 'Could not retry.');
+            retryBtn.disabled = false;
+          }
+        })
+        .catch(function () {
+          HC.toast('error', 'Retry refused', 'Network error.');
+          retryBtn.disabled = false;
+        });
+      return;
+    }
+    var purgeBtn = e.target.closest ? e.target.closest('[data-t-purge]') : null;
+    if (purgeBtn) {
+      var pid = purgeBtn.getAttribute('data-t-purge');
+      if (!window.confirm('Purge this torrent? Removes its record, quarantine data, and engine log.')) return;
+      purgeBtn.disabled = true;
+      fetch('/api/torrents/' + encodeURIComponent(pid), { method: 'DELETE' })
+        .then(function (resp) { return resp.json().then(function (data) { return { ok: resp.ok, data: data }; }); })
+        .then(function (out) {
+          if (out.ok) {
+            HC.toast('success', 'Purged', 'Torrent record removed.');
+            refresh();
+          } else {
+            HC.toast('error', 'Purge failed', out.data.error || 'Could not purge.');
+            purgeBtn.disabled = false;
+          }
+        })
+        .catch(function () {
+          HC.toast('error', 'Purge failed', 'Network error.');
+          purgeBtn.disabled = false;
+        });
       return;
     }
     var cancel = e.target.closest ? e.target.closest('[data-t-cancel]') : null;

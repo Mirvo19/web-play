@@ -206,6 +206,64 @@ def engine_log(torrent_id):
     }), 200
 
 
+@torrents_bp.route("/<torrent_id>", methods=["DELETE"])
+@login_required
+def purge_torrent(torrent_id):
+    """Delete a torrent job and everything attached to it.
+
+    Removes the row, wipes its quarantine dir, and deletes its engine log.
+    Only terminal or pre-download states (failed/cancelled/awaiting_selection)
+    — active work must be cancelled first so no worker is mid-write.
+    """
+    row = db.session.get(TorrentJob, torrent_id)
+    if row is None:
+        return jsonify({"error": "Torrent not found"}), 404
+    if row.state not in ("failed", "cancelled", "awaiting_selection"):
+        return jsonify({
+            "error": f"Cannot purge while torrent is '{row.state}' — cancel it first."
+        }), 409
+
+    from app.torrents.coordinator import engine_log_path, quarantine_base
+
+    base = quarantine_base(current_app)
+    torrent_engine.wipe_quarantine(os.path.join(base, "torrent_" + (row.quarantine_token or "")))
+    try:
+        log_path = engine_log_path(current_app, torrent_id)
+        if os.path.isfile(log_path):
+            os.remove(log_path)
+    except OSError as e:
+        current_app.logger.warning("Could not remove engine log for %s: %s", torrent_id, e)
+
+    db.session.delete(row)
+    db.session.commit()
+    current_app.logger.warning("Torrent %s purged", torrent_id)
+    return jsonify({"message": "Torrent purged", "torrent_id": torrent_id}), 200
+
+
+@torrents_bp.route("/<torrent_id>/retry", methods=["POST"])
+@login_required
+def retry_torrent(torrent_id):
+    """Relaunch a failed/cancelled torrent from metadata fetch."""
+    from datetime import datetime, timezone
+
+    row = db.session.get(TorrentJob, torrent_id)
+    if row is None:
+        return jsonify({"error": "Torrent not found"}), 404
+    if row.state not in ("failed", "cancelled"):
+        return jsonify({
+            "error": f"Only failed/cancelled torrents can be retried (state '{row.state}')."
+        }), 409
+    row.state = "fetching_metadata"
+    row.error_message = None
+    row.cancel_requested = False
+    row.progress_json = None
+    row.speed_bps = 0.0
+    row.completed_at = None
+    db.session.commit()
+    current_app.logger.info("Torrent %s queued for retry", torrent_id)
+    return jsonify({"message": "Torrent retry queued", "torrent": row.to_dict()}), 200
+
+
 @torrents_bp.route("/<torrent_id>/cancel", methods=["POST"])
 @login_required
 def cancel_torrent(torrent_id):

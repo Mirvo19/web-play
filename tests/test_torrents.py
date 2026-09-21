@@ -415,5 +415,71 @@ class EngineLogEndpointTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 404)
 
 
+class PurgeRetryTests(unittest.TestCase):
+    def _row(self, app, state="failed", token="pr1"):
+        from app.models import TorrentJob, db
+
+        with app.app_context():
+            row = TorrentJob(source_kind="magnet", source_ref="magnet:?x",
+                             quarantine_token=token, state=state,
+                             error_message="boom" if state == "failed" else None)
+            db.session.add(row)
+            db.session.commit()
+            return row.id
+
+    def test_purge_failed_removes_row_quarantine_and_log(self):
+        from app.models import TorrentJob, db
+        from app.torrents.coordinator import engine_log_path, quarantine_base
+        from app.torrents import engine as _eng
+
+        app = create_app(_test_config())
+        client = _authed_client(app)
+        tid = self._row(app, "failed", "pr1")
+        with app.app_context():
+            q = _eng.quarantine_for(quarantine_base(app), "pr1")
+            with open(os.path.join(q, "part"), "w") as f:
+                f.write("x")
+            log_path = engine_log_path(app, tid)
+            with open(log_path, "w") as f:
+                f.write("log\n")
+
+        resp = client.delete(f"/api/torrents/{tid}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(os.path.exists(q))
+        self.assertFalse(os.path.exists(log_path))
+        with app.app_context():
+            self.assertIsNone(db.session.get(TorrentJob, tid))
+
+    def test_purge_active_refused(self):
+        app = create_app(_test_config())
+        client = _authed_client(app)
+        tid = self._row(app, "downloading", "pr2")
+        resp = client.delete(f"/api/torrents/{tid}")
+        self.assertEqual(resp.status_code, 409)
+
+    def test_retry_failed_requeues(self):
+        from app.models import TorrentJob, db
+
+        app = create_app(_test_config())
+        client = _authed_client(app)
+        tid = self._row(app, "failed", "pr3")
+        resp = client.post(f"/api/torrents/{tid}/retry")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()["torrent"]
+        self.assertEqual(body["state"], "fetching_metadata")
+        self.assertIsNone(body["error_message"])
+        with app.app_context():
+            row = db.session.get(TorrentJob, tid)
+            self.assertFalse(row.cancel_requested)
+            self.assertIsNone(row.completed_at)
+
+    def test_retry_handed_off_refused(self):
+        app = create_app(_test_config())
+        client = _authed_client(app)
+        tid = self._row(app, "handed_off", "pr4")
+        resp = client.post(f"/api/torrents/{tid}/retry")
+        self.assertEqual(resp.status_code, 409)
+
+
 if __name__ == "__main__":
     unittest.main()
