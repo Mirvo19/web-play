@@ -10,6 +10,13 @@ from werkzeug.utils import secure_filename
 from app.auth import login_required
 from app.models import db, Video, VideoVariant, VideoFile, Job, CDNAccount, Setting, JobLog, StorageSnapshot
 from app.cdn.manager import CDNManager
+from app.utils.uploads import (
+    UploadTooLarge,
+    ensure_job_dir,
+    jailed_path,
+    sanitized_filename,
+    stream_to_file,
+)
 from app.worker.pipeline import request_job_cancel
 
 api_bp = Blueprint('api', __name__, url_prefix='/api')
@@ -38,7 +45,28 @@ def _check_disk_space(upload_folder: str, incoming_bytes: int) -> tuple:
 
 
 def _max_upload_bytes(app) -> int:
-    return int(app.config.get('MAX_UPLOAD_SIZE_GB', 4) * 1024 ** 3)
+    try:
+        return int(float(app.config.get('MAX_UPLOAD_SIZE_GB', 4)) * 1024 ** 3)
+    except (TypeError, ValueError):
+        return 4 * 1024 ** 3
+
+
+def _cleanup_failed_upload(video_id: str | None, job_id: str | None, work_dir: str | None):
+    """Remove DB rows + partial files for an upload that never completed."""
+    if job_id:
+        job = db.session.get(Job, job_id)
+        if job is not None:
+            db.session.delete(job)
+    if video_id:
+        video = db.session.get(Video, video_id)
+        if video is not None:
+            db.session.delete(video)
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+    if work_dir and os.path.exists(work_dir):
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -56,22 +84,24 @@ def upload_video_stream():
         return jsonify({'error': 'No video file provided'}), 400
 
     file = request.files['file']
-    title = request.form.get('title', '').strip() or os.path.splitext(file.filename)[0]
+    raw_name = file.filename or 'source.mp4'
+    title = request.form.get('title', '').strip() or os.path.splitext(raw_name)[0][:200]
     description = request.form.get('description', '').strip()
     cdn_account_id = request.form.get('cdn_account_id', '').strip()
 
     if not cdn_account_id:
         return jsonify({'error': 'CDN Account selection is required'}), 400
 
-    cdn_account = CDNAccount.query.get(cdn_account_id)
+    cdn_account = db.session.get(CDNAccount, cdn_account_id)
     if not cdn_account or not cdn_account.enabled:
         return jsonify({'error': 'Selected CDN Account is invalid or disabled'}), 400
 
-    # Check upload size limit from Content-Length header
+    # Content-Length is advisory only (may be missing or spoofed) — the real
+    # limit is enforced on actual bytes written by stream_to_file below.
     max_bytes = _max_upload_bytes(current_app)
     try:
         cl = int(request.headers.get('Content-Length') or 0)
-    except Exception:
+    except (TypeError, ValueError):
         cl = 0
     if cl > max_bytes:
         return jsonify({
@@ -84,8 +114,8 @@ def upload_video_stream():
     if not ok:
         return jsonify({'error': err}), 507
 
-    # Create Video record
-    filename = secure_filename(file.filename)
+    # Create Video record (filename sanitized + jailed — never trust client names)
+    filename = sanitized_filename(raw_name)
     video = Video(
         title=title,
         description=description,
@@ -110,37 +140,28 @@ def upload_video_stream():
     db.session.add(job)
     db.session.commit()
 
-    # Work dir is job-scoped
-    work_dir = os.path.join(upload_folder, job.id)
-    os.makedirs(work_dir, exist_ok=True)
-    save_path = os.path.join(work_dir, filename)
+    # Work dir is job-scoped, jailed inside the upload folder
+    work_dir = ensure_job_dir(upload_folder, job.id)
+    save_path = jailed_path(work_dir, filename)
 
     try:
-        # Stream in 4 MB chunks — never call file.read() for the whole body
-        chunk_size = 4 * 1024 * 1024
-        bytes_written = 0
-        start_ts = time.time()
-        last_update = 0.0
+        # Stream in chunks with a REAL running byte-count limit — never call
+        # file.read() for the whole body, and never trust Content-Length.
+        last_update = [0.0]
 
-        with open(save_path, 'wb', buffering=8 * 1024 * 1024) as out_f:
-            while True:
-                chunk = file.stream.read(chunk_size)
-                if not chunk:
-                    break
-                out_f.write(chunk)
-                bytes_written += len(chunk)
+        def _progress(bytes_written: int):
+            now_ts = time.time()
+            if cl > 0 and now_ts - last_update[0] > 2.0:
+                db.session.refresh(job)
+                job.bytes_received = bytes_written
+                job.progress = min(100.0, bytes_written / cl * 100.0)
+                db.session.commit()
+                last_update[0] = now_ts
 
-                now_ts = time.time()
-                if cl > 0 and now_ts - last_update > 2.0:
-                    pct = min(100.0, bytes_written / cl * 100.0)
-                    db.session.refresh(job)
-                    job.bytes_received = bytes_written
-                    job.progress = pct
-                    db.session.commit()
-                    last_update = now_ts
+        stream_to_file(file.stream, save_path, max_bytes, on_progress=_progress)
+        file_size = os.path.getsize(save_path)
 
         # Upload complete — immediately transition to queued
-        file_size = os.path.getsize(save_path)
         video.original_size = file_size
         job.status = 'queued'
         job.stage = 'queued'
@@ -151,16 +172,16 @@ def upload_video_stream():
         job.bytes_total = file_size
         db.session.commit()
 
+    except UploadTooLarge:
+        _cleanup_failed_upload(video.id, job.id, work_dir)
+        return jsonify({
+            'error': f"Upload exceeds maximum allowed size of "
+                     f"{current_app.config.get('MAX_UPLOAD_SIZE_GB', 4)} GB."
+        }), 413
     except Exception as e:
         # Clean up on failure
-        try:
-            db.session.delete(job)
-            db.session.delete(video)
-            db.session.commit()
-        except Exception:
-            pass
-        if os.path.exists(work_dir):
-            shutil.rmtree(work_dir, ignore_errors=True)
+        _cleanup_failed_upload(video.id, job.id, work_dir)
+        current_app.logger.warning("Upload failed for job %s: %s", job.id, e)
         return jsonify({'error': f'Upload failed: {str(e)}'}), 500
 
     return jsonify({
@@ -180,21 +201,23 @@ def upload_video_init():
     title = request.form.get('title', '').strip()
     description = request.form.get('description', '').strip()
     cdn_account_id = request.form.get('cdn_account_id', '').strip()
-    filename = request.form.get('filename', '').strip()
+    raw_filename = request.form.get('filename', '').strip()
     try:
         declared_size = int(request.form.get('size', 0))
-    except Exception:
+    except (TypeError, ValueError):
         declared_size = 0
+    declared_size = max(0, declared_size)
 
     if not cdn_account_id:
         return jsonify({'error': 'CDN Account selection is required'}), 400
 
-    cdn_account = CDNAccount.query.get(cdn_account_id)
+    cdn_account = db.session.get(CDNAccount, cdn_account_id)
     if not cdn_account or not cdn_account.enabled:
         return jsonify({'error': 'Selected CDN Account is invalid or disabled'}), 400
 
-    if not filename:
+    if not raw_filename:
         return jsonify({'error': 'Filename is required'}), 400
+    filename = sanitized_filename(raw_filename)
 
     max_bytes = _max_upload_bytes(current_app)
     if declared_size > max_bytes:
@@ -258,18 +281,20 @@ def upload_video_streamed(video_id):
         return jsonify({'error': 'No active upload job found for this video'}), 400
 
     upload_folder = current_app.config.get('UPLOAD_FOLDER', '/tmp/video-processing')
-    # Store upload in the job-scoped directory
-    work_dir = os.path.join(upload_folder, job.id)
-    os.makedirs(work_dir, exist_ok=True)
-    filename = video.original_filename or 'source.mp4'
-    save_path = os.path.join(work_dir, filename)
+    # Store upload in the job-scoped directory, jailed inside upload_folder.
+    # The filename was sanitized at init; re-sanitize defensively in case the
+    # record predates the fix or was written by another path.
+    work_dir = ensure_job_dir(upload_folder, job.id)
+    filename = sanitized_filename(video.original_filename or 'source.mp4')
+    save_path = jailed_path(work_dir, filename)
 
     try:
         content_length = int(request.headers.get('Content-Length') or 0)
-    except Exception:
+    except (TypeError, ValueError):
         content_length = 0
+    content_length = max(0, content_length)
 
-    # Enforce size limit
+    # Enforce size limit on the header AND (below) on actual bytes written.
     max_bytes = _max_upload_bytes(current_app)
     if content_length > max_bytes:
         return jsonify({
@@ -282,78 +307,8 @@ def upload_video_streamed(video_id):
         job.bytes_total = content_length
         db.session.commit()
 
-    try:
-        # Multipart fallback (older clients)
-        if 'file' in request.files:
-            f = request.files['file']
-            f.save(save_path)
-            file_size = os.path.getsize(save_path)
-            video.original_size = file_size
-            job.status = 'queued'
-            job.stage = 'queued'
-            job.current_step = 'Queued for processing'
-            job.current_message = 'Upload complete — awaiting background processing'
-            job.progress = 100.0
-            job.bytes_received = file_size
-            job.bytes_total = file_size
-            db.session.commit()
-            return jsonify({'message': 'Upload saved', 'size': file_size}), 201
-
-        # Streaming raw body — 4 MB chunks
-        chunk_size = 4 * 1024 * 1024
-        bytes_written = 0
-        last_update = 0.0
-        last_cancel_check = 0.0
-        start_ts = time.time()
-
-        with open(save_path, 'wb', buffering=8 * 1024 * 1024) as out_f:
-            while True:
-                chunk = request.stream.read(chunk_size)
-                if not chunk:
-                    break
-                out_f.write(chunk)
-                bytes_written += len(chunk)
-
-                now_ts = time.time()
-
-                # Cancellation check every 5 s (avoids DB hammering)
-                if now_ts - last_cancel_check > 5.0:
-                    db.session.refresh(job)
-                    last_cancel_check = now_ts
-                    if job.status == 'cancelled':
-                        raise RuntimeError('Upload cancelled by user')
-
-                # Progress update every 2 s
-                if now_ts - last_update > 2.0:
-                    elapsed = now_ts - start_ts
-                    speed_bps = bytes_written / max(elapsed, 0.001)
-
-                    if content_length > 0:
-                        pct = min(99.0, bytes_written / content_length * 100.0)
-                        eta = int(max(0, (content_length - bytes_written) / max(speed_bps, 1)))
-                    else:
-                        pct = min(80.0, 5.0 + bytes_written / (1024 * 1024) * 0.5)
-                        eta = None
-
-                    job.stage = 'receiving_upload'
-                    job.current_step = 'Receiving upload'
-                    job.current_message = (
-                        f"Receiving {round(bytes_written / 1024**2, 1)} MB"
-                        + (f" / {round(content_length / 1024**2, 1)} MB" if content_length else "")
-                    )
-                    job.progress = pct
-                    job.bytes_received = bytes_written
-                    job.bytes_total = content_length
-                    if eta is not None:
-                        job.eta_seconds = eta
-                    db.session.commit()
-                    last_update = now_ts
-
-        # --- Upload body fully received ---
-        file_size = os.path.getsize(save_path)
+    def _finish_upload(file_size: int):
         video.original_size = file_size
-
-        # Transition to queued IMMEDIATELY — do not leave it "receiving"
         job.status = 'queued'
         job.stage = 'queued'
         job.current_step = 'Queued for processing'
@@ -364,9 +319,88 @@ def upload_video_streamed(video_id):
         job.eta_seconds = None
         db.session.commit()
 
+    try:
+        # Multipart fallback (older clients) — streamed with the same
+        # running byte-count limit, NOT an unbounded f.save().
+        if 'file' in request.files:
+            f = request.files['file']
+            try:
+                stream_to_file(f.stream, save_path, max_bytes)
+            except UploadTooLarge:
+                if os.path.exists(save_path):
+                    os.remove(save_path)
+                return jsonify({
+                    'error': f"Upload exceeds maximum allowed size of "
+                             f"{current_app.config.get('MAX_UPLOAD_SIZE_GB', 4)} GB."
+                }), 413
+            file_size = os.path.getsize(save_path)
+            _finish_upload(file_size)
+            return jsonify({'message': 'Upload saved', 'size': file_size}), 201
+
+        # Streaming raw body — chunked write with a REAL byte-count limit.
+        last_update = 0.0
+        last_cancel_check = 0.0
+        start_ts = time.time()
+        bytes_written = [0]
+
+        def _stream_progress(n: int):
+            nonlocal last_update, last_cancel_check
+            bytes_written[0] = n
+            now_ts = time.time()
+
+            # Cancellation check every 5 s (avoids DB hammering)
+            if now_ts - last_cancel_check > 5.0:
+                db.session.refresh(job)
+                last_cancel_check = now_ts
+                if job.status == 'cancelled':
+                    raise RuntimeError('Upload cancelled by user')
+
+            # Progress update every 2 s
+            if now_ts - last_update > 2.0:
+                elapsed = now_ts - start_ts
+                speed_bps = n / max(elapsed, 0.001)
+
+                if content_length > 0:
+                    pct = min(99.0, n / content_length * 100.0)
+                    eta = int(max(0, (content_length - n) / max(speed_bps, 1)))
+                else:
+                    pct = min(80.0, 5.0 + n / (1024 * 1024) * 0.5)
+                    eta = None
+
+                job.stage = 'receiving_upload'
+                job.current_step = 'Receiving upload'
+                job.current_message = (
+                    f"Receiving {round(n / 1024**2, 1)} MB"
+                    + (f" / {round(content_length / 1024**2, 1)} MB" if content_length else "")
+                )
+                job.progress = pct
+                job.bytes_received = n
+                job.bytes_total = content_length
+                if eta is not None:
+                    job.eta_seconds = eta
+                db.session.commit()
+                last_update = now_ts
+
+        try:
+            stream_to_file(request.stream, save_path, max_bytes, on_progress=_stream_progress)
+        except UploadTooLarge:
+            if os.path.exists(save_path):
+                os.remove(save_path)
+            return jsonify({
+                'error': f"Upload exceeds maximum allowed size of "
+                         f"{current_app.config.get('MAX_UPLOAD_SIZE_GB', 4)} GB."
+            }), 413
+
+        # --- Upload body fully received ---
+        file_size = os.path.getsize(save_path)
+
+        # Transition to queued IMMEDIATELY — do not leave it "receiving"
+        _finish_upload(file_size)
+
         return jsonify({'message': 'Upload saved', 'size': file_size}), 201
 
     except Exception as e:
+        current_app.logger.warning("Streamed upload failed for job %s: %s", job.id, e)
         return jsonify({'error': f'Upload failed: {str(e)}'}), 500
 
 

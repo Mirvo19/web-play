@@ -22,6 +22,7 @@ from flask import current_app
 import psutil
 from app.models import db, Video, VideoVariant, VideoFile, Job, JobLog, Setting, CDNAccount
 from app.cdn.manager import CDNManager
+from app.utils.uploads import ensure_job_dir, jailed_path, sanitized_filename
 from app.worker.ffmpeg_processor import (
     inspect_video,
     determine_quality_targets,
@@ -457,18 +458,17 @@ def execute_video_pipeline(job_id: str):
 
         # Working directory is scoped to the JOB (not the video) so that
         # simultaneous jobs for different videos never share a workspace.
-        work_dir = os.path.join(upload_folder, job_id)
-        os.makedirs(work_dir, exist_ok=True)
+        # Both the dir and the filename go through the jailed upload helpers
+        # (defence in depth — the API already sanitizes at write time).
+        work_dir = ensure_job_dir(upload_folder, job_id)
+        filename = sanitized_filename(video.original_filename or 'source.mp4')
+        source_file = jailed_path(work_dir, filename)
 
         # The uploaded file may have been placed in the video's own directory
-        # by the upload endpoint.  Look for it there first, then in the job dir.
-        video_work_dir = os.path.join(upload_folder, video.id)
-        filename = video.original_filename or 'source.mp4'
-        source_file = os.path.join(work_dir, filename)
-
-        # If the upload endpoint wrote to a video-id directory, move the file
-        # into the job-id directory now.
-        legacy_source = os.path.join(video_work_dir, filename)
+        # by an older upload endpoint. Look for it there first (jailed), then
+        # in the job dir.
+        video_work_dir = jailed_path(upload_folder, sanitized_filename(video.id, default="job"))
+        legacy_source = jailed_path(video_work_dir, filename)
         if not os.path.exists(source_file) and os.path.exists(legacy_source):
             try:
                 shutil.move(legacy_source, source_file)
