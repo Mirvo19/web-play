@@ -1,15 +1,17 @@
 """
 HC CDN Player — Video Processing Pipeline
 ==========================================
-Runs inside the background worker process ONLY (never inside Gunicorn).
+Runs on executor threads owned by the in-process JobSupervisor (same
+process as the Flask app — see app/worker/supervisor.py).
 
 Design invariants:
-- Working directory is /tmp/video-processing/<job_id>/  (job-scoped, unique)
-- FFmpeg stdout is read line-by-line; never buffered to a bytes object.
-- FFmpeg stderr is drained by a daemon thread to prevent pipe-buffer deadlock.
-- All DB writes use db.session within the same app context provided by the worker.
-- Cancellation is checked at every stage boundary via the JobController and the
-  cancel_requested DB column (web process sets the column; worker reads it).
+- Working directory is <upload_folder>/<job_id>/  (job-scoped, unique)
+- FFmpeg stdout/stderr are pumped by daemon threads into bounded buffers;
+  the monitor loop never blocks on a pipe, so a stalled FFmpeg stays
+  cancellable and every wait() has a real timeout.
+- All DB writes use db.session within the app context of the calling thread.
+- Cancellation is checked at every stage boundary via the JobController,
+  the cancel_requested DB column, and the process-wide shutdown event.
 """
 import os
 import shutil
@@ -17,6 +19,7 @@ import time
 import requests
 import subprocess
 import threading
+from collections import deque
 from datetime import datetime, timezone
 from flask import current_app
 import psutil
@@ -318,53 +321,82 @@ def _run_ffmpeg_variant(
     )
     ctrl.set_process(proc)
 
-    # Drain stderr on a daemon thread — prevents pipe-buffer deadlock for
-    # long FFmpeg runs where stderr fills the OS pipe buffer.
-    stderr_lines = []
+    # Bounded log buffers: a wedged FFmpeg must never grow memory without
+    # limit. stderr keeps the last 200 lines; stdout is parsed, not stored.
+    stderr_lines: deque = deque(maxlen=200)
+    parsed: dict = {}
+    parsed_lock = threading.Lock()
+
+    def _pump_stdout():
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if '=' in line:
+                    key, _, val = line.partition('=')
+                    with parsed_lock:
+                        parsed[key.strip()] = val.strip()
+        except Exception:
+            pass
 
     def _drain_stderr():
-        for line in proc.stderr:
-            stderr_lines.append(line)
+        try:
+            for line in proc.stderr:
+                stderr_lines.append(line)
+        except Exception:
+            pass
 
+    stdout_thread = threading.Thread(target=_pump_stdout, daemon=True)
     stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    stdout_thread.start()
     stderr_thread.start()
 
-    parsed = {}
+    try:
+        timeout_sec = int(os.environ.get('FFMPEG_VARIANT_TIMEOUT_SEC', '7200'))
+    except (TypeError, ValueError):
+        timeout_sec = 7200
+    deadline = time.time() + max(5, timeout_sec)
     last_db_write = 0.0
+    timed_out = False
 
+    # Monitor loop: NEVER blocks on a pipe. Every tick (1 s) has a bounded
+    # wait, an independent cancel/shutdown check (works even when FFmpeg
+    # emits no stdout, e.g. stalled on I/O), and a hard per-variant timeout.
     try:
         while True:
-            line = proc.stdout.readline()
-            # EOF from stdout
-            if line == '' and proc.poll() is not None:
+            try:
+                ret = proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                ret = None
+
+            # Independent cancel check — not tied to stdout output.
+            _check_cancel(job_id, ctrl)
+
+            if time.time() > deadline:
+                timed_out = True
                 break
 
-            line = line.strip()
-            if '=' in line:
-                key, _, val = line.partition('=')
-                parsed[key.strip()] = val.strip()
-
-            # When FFmpeg emits progress=continue or progress=end, flush
-            prog_event = parsed.get('progress', '')
-            if prog_event in ('continue', 'end') or 'out_time_ms' in parsed:
+            with parsed_lock:
+                snapshot = dict(parsed)
+            prog_event = snapshot.get('progress', '')
+            if prog_event in ('continue', 'end') or 'out_time_ms' in snapshot:
                 # Calculate encoded seconds
                 enc_secs = 0.0
-                raw_ms = parsed.get('out_time_ms', '0')
+                raw_ms = snapshot.get('out_time_ms', '0')
                 try:
                     enc_secs = max(0.0, int(raw_ms) / 1_000_000.0)
                 except (ValueError, TypeError):
-                    raw_ot = parsed.get('out_time', '0:00:00.000000')
+                    raw_ot = snapshot.get('out_time', '0:00:00.000000')
                     try:
                         parts = raw_ot.split(':')
                         enc_secs = float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
-                    except Exception:
+                    except (ValueError, IndexError):
                         enc_secs = 0.0
 
                 frac = min(1.0, enc_secs / source_dur)
                 overall = base_progress + progress_per_variant * frac
 
                 # Speed and ETA
-                speed_str = parsed.get('speed', '')
+                speed_str = snapshot.get('speed', '')
                 eta_secs = None
                 if speed_str and speed_str.endswith('x'):
                     try:
@@ -377,7 +409,7 @@ def _run_ffmpeg_variant(
                 elapsed = int(time.time() - job_start_time)
 
                 now_ts = time.time()
-                if now_ts - last_db_write >= 0.5:
+                if now_ts - last_db_write >= 1.0:
                     detail = f"Encoding {label} — {round(frac * 100, 1)}%"
                     if speed_str:
                         detail += f" — speed={speed_str}"
@@ -396,14 +428,48 @@ def _run_ffmpeg_variant(
                     )
                     last_db_write = now_ts
 
-            # Check cancellation on every stdout line
-            _check_cancel(job_id, ctrl)
+            if ret is not None:
+                break
 
+    except JobCancelled:
+        # Terminate FFmpeg promptly, then re-raise for the pipeline handler.
+        try:
+            ctrl.request_cancel()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        raise
     finally:
         ctrl.clear_process()
 
-    proc.wait()
-    stderr_thread.join(timeout=3)
+    if timed_out:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+        _log_job(job_id, f"FFmpeg timed out for {label} after {timeout_sec}s", level='ERROR')
+        raise RuntimeError(f"FFmpeg timed out after {timeout_sec}s for {label}")
+
+    try:
+        proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        raise RuntimeError(f"FFmpeg for {label} did not exit after completion signal")
+    stdout_thread.join(timeout=5)
+    stderr_thread.join(timeout=5)
 
     ret = proc.returncode
     stderr_text = ''.join(stderr_lines).strip()
