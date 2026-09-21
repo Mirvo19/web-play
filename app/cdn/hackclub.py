@@ -18,31 +18,31 @@ class HackClubCDNProvider(CDNProvider):
     TOTAL_STORAGE_LIMIT = 50 * 1024 * 1024 * 1024  # 50 GB per account
 
     def test_connection(self) -> Tuple[bool, str]:
-        if not self.api_key:
+        """Probe the CDN API with the configured key.
+
+        Every outcome reflects the actual HTTP response — there is no
+        key-length heuristic fallback. A key that the API rejects (or that
+        cannot be verified because the API is unreachable) reports failure.
+        """
+        if not self.api_key or not self.api_key.strip():
             return False, "API Key is required"
         try:
-            # We test by calling /api/v4/stats or user endpoint or headers check
             headers = {"Authorization": f"Bearer {self.api_key}"}
             resp = requests.get(f"{self.BASE_URL}/api/v4/user", headers=headers, timeout=10)
             if resp.status_code in (200, 201):
                 return True, "Connection successful"
-            
-            # Alternative: check docs / api endpoint
-            resp_docs = requests.get(f"{self.BASE_URL}/api/v4/stats", headers=headers, timeout=10)
-            if resp_docs.status_code in (200, 201):
-                return True, "Connection successful"
-                
-            if resp.status_code == 401:
-                return False, "Invalid API Key (401 Unauthorized)"
 
-            # If stats endpoint is not public, fallback test validation of key format
-            if len(self.api_key.strip()) >= 8:
-                return True, "API Key validated"
-            return False, f"Server responded with status {resp.status_code}"
-        except Exception as e:
-            # Fallback for offline or key check validation
-            if len(self.api_key.strip()) >= 8:
-                return True, "API Key format valid"
+            resp_stats = requests.get(f"{self.BASE_URL}/api/v4/stats", headers=headers, timeout=10)
+            if resp_stats.status_code in (200, 201):
+                return True, "Connection successful"
+
+            if resp.status_code in (401, 403) or resp_stats.status_code in (401, 403):
+                return False, "Invalid API Key (unauthorized by CDN API)"
+            return False, (
+                f"CDN API did not accept the key "
+                f"(user={resp.status_code}, stats={resp_stats.status_code})"
+            )
+        except requests.RequestException as e:
             return False, f"Connection error: {str(e)}"
 
     def upload_file(self, local_file_path: str, remote_filename: str = None) -> Dict[str, Any]:
@@ -226,25 +226,34 @@ class HackClubCDNProvider(CDNProvider):
         return False, tried
 
     def get_storage_info(self) -> Dict[str, int]:
+        """Query live storage usage from the CDN API.
+
+        Raises:
+            RuntimeError: when the API cannot be reached or does not return
+                usable data. Callers must surface this failure — returning
+                fake "0 used / 50 GB free" here previously hid outages and
+                let operators believe capacity existed that did not.
+        """
         headers = {"Authorization": f"Bearer {self.api_key}"}
         try:
             resp = requests.get(f"{self.BASE_URL}/api/v4/stats", headers=headers, timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                used = data.get("used_bytes", 0)
-                total = self.TOTAL_STORAGE_LIMIT
-                return {
-                    "used_bytes": used,
-                    "available_bytes": max(0, total - used),
-                    "total_bytes": total
-                }
-        except Exception:
-            pass
-
-        # Fallback limit calculation
+        except requests.RequestException as e:
+            raise RuntimeError(f"CDN storage lookup failed: {str(e)}")
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"CDN storage lookup failed (HTTP {resp.status_code}): {resp.text[:200]}"
+            )
+        try:
+            data = resp.json()
+        except ValueError as e:
+            raise RuntimeError(f"CDN storage lookup returned invalid JSON: {e}")
+        try:
+            used = int(data.get("used_bytes", 0))
+        except (TypeError, ValueError):
+            raise RuntimeError("CDN storage lookup returned an invalid used_bytes value")
         total = self.TOTAL_STORAGE_LIMIT
         return {
-            "used_bytes": 0,
-            "available_bytes": total,
-            "total_bytes": total
+            "used_bytes": max(0, used),
+            "available_bytes": max(0, total - used),
+            "total_bytes": total,
         }

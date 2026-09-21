@@ -525,15 +525,35 @@ def create_cdn_account():
 @api_bp.route('/cdn-accounts/<account_id>/test', methods=['POST'])
 @login_required
 def test_cdn_account(account_id):
-    account = CDNAccount.query.get_or_404(account_id)
+    account = db.session.get(CDNAccount, account_id)
+    if account is None:
+        return jsonify({'error': 'CDN account not found'}), 404
     success, msg = CDNManager.test_account(account)
-    return jsonify({'success': success, 'message': msg})
+    # Real provider result — success reflects the actual API response.
+    return jsonify({'success': success, 'message': msg}), 200 if success else 502
+
+
+@api_bp.route('/cdn-accounts/<account_id>/refresh-storage', methods=['POST'])
+@login_required
+def refresh_cdn_storage(account_id):
+    """Persist a fresh live storage snapshot; surfaces real API failures."""
+    account = db.session.get(CDNAccount, account_id)
+    if account is None:
+        return jsonify({'error': 'CDN account not found'}), 404
+    try:
+        account.refresh_storage_snapshot()
+    except Exception as e:
+        current_app.logger.warning("CDN storage refresh failed for %s: %s", account_id, e)
+        return jsonify({'success': False, 'message': str(e)[:500]}), 502
+    return jsonify({'success': True, 'storage': account.get_latest_storage()})
 
 
 @api_bp.route('/cdn-accounts/<account_id>', methods=['DELETE'])
 @login_required
 def delete_cdn_account(account_id):
-    account = CDNAccount.query.get_or_404(account_id)
+    account = db.session.get(CDNAccount, account_id)
+    if account is None:
+        return jsonify({'error': 'CDN account not found'}), 404
     db.session.delete(account)
     db.session.commit()
     return jsonify({'message': 'CDN Account deleted successfully'})

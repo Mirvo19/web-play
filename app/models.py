@@ -62,17 +62,42 @@ class CDNAccount(db.Model):
                 'used_bytes': latest.used_bytes,
                 'available_bytes': latest.available_bytes,
                 'total_bytes': latest.total_bytes,
-                'checked_at': latest.checked_at.isoformat() if latest.checked_at else None
+                'checked_at': latest.checked_at.isoformat() if latest.checked_at else None,
+                'live': True,
             }
-        # Fallback default (50 GB per CDN account limit)
+        # No live snapshot yet: report honest LOCAL accounting (files this
+        # app has uploaded) and flag it stale — never present this as live
+        # CDN truth.
         cap = 50 * 1024 * 1024 * 1024  # 53,687,091,200 bytes
         used = sum(f.file_size or 0 for f in self.files if f.upload_status == 'uploaded')
         return {
             'used_bytes': used,
             'available_bytes': max(0, cap - used),
             'total_bytes': cap,
-            'checked_at': None
+            'checked_at': None,
+            'live': False,
         }
+
+    def refresh_storage_snapshot(self):
+        """Query the live CDN API and persist a StorageSnapshot.
+
+        Raises whatever the provider raises on failure — callers (API,
+        health checks) must surface the error instead of showing stale
+        numbers as current.
+        """
+        from app.cdn.manager import CDNManager
+
+        provider = CDNManager.get_provider_instance(self)
+        info = provider.get_storage_info()
+        snap = StorageSnapshot(
+            cdn_account_id=self.id,
+            used_bytes=info['used_bytes'],
+            available_bytes=info['available_bytes'],
+            total_bytes=info['total_bytes'],
+        )
+        db.session.add(snap)
+        db.session.commit()
+        return snap
 
     def to_dict(self, include_storage=True):
         data = {
