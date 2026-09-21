@@ -1,8 +1,10 @@
+import logging
 import time
 from datetime import datetime, timezone
 from app.models import db, Video, VideoFile, Job, JobLog, CDNAccount
 from app.cdn.manager import CDNManager
-from flask import current_app
+
+_logger = logging.getLogger(__name__)
 
 def log_delete_job(job_id: str, message: str, level: str = 'INFO'):
     now = datetime.now(timezone.utc)
@@ -18,11 +20,7 @@ def log_delete_job(job_id: str, message: str, level: str = 'INFO'):
     if job:
         job.current_message = message
     db.session.commit()
-    try:
-        if current_app.config.get('LOG_TO_STDOUT', False):
-            print(f"[DELETE JOB {job_id}] {level}: {formatted_msg}")
-    except Exception:
-        pass
+    _logger.log(getattr(logging, level.upper(), logging.INFO), "delete-job=%s %s", job_id[:8], message)
 
 def execute_video_deletion(job_id: str):
     """

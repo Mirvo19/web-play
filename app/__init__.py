@@ -7,20 +7,29 @@ from flask import Flask
 
 from app.config import Config
 from app.models import Setting, CDNAccount, db
+from app.startup import validate_config
 
 log = logging.getLogger(__name__)
 
 
 def _configure_logging(app: Flask) -> None:
-    """Single structured logging setup (stdlib only). Full JSON options land in Stage 3."""
-    level = logging.DEBUG if app.debug else logging.INFO
-    if not logging.getLogger().handlers:
-        logging.basicConfig(
-            level=level,
-            format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-        )
-    else:
-        logging.getLogger().setLevel(level)
+    """One stdlib logging setup for the whole process.
+
+    Format is a stable single line (timestamp, level, logger, message) so
+    journald / log aggregators can parse it. Level via LOG_LEVEL env.
+    """
+    level_name = str(os.environ.get("LOG_LEVEL", "INFO")).upper()
+    level = getattr(logging, level_name, logging.INFO)
+    if app.debug:
+        level = logging.DEBUG
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)-8s [%(name)s] %(message)s"
+    ))
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(handler)
+    root.setLevel(level)
     # Quiet noisy third-party loggers one notch.
     for noisy in ("werkzeug", "urllib3"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
@@ -29,6 +38,7 @@ def _configure_logging(app: Flask) -> None:
 def create_app(config_class=Config):
     from app.auth import auth_bp
     from app.routes.api import api_bp
+    from app.routes.health import health_bp
     from app.routes.views import views_bp
 
     app = Flask(__name__)
@@ -48,10 +58,28 @@ def create_app(config_class=Config):
         app_version=app.config.get('APP_VERSION', 'v1.0.0-patch-1')
     )
 
-    # Register Blueprints
+    # Register Blueprints (health endpoints carry no auth — load balancers)
     app.register_blueprint(auth_bp)
     app.register_blueprint(views_bp)
     app.register_blueprint(api_bp)
+    app.register_blueprint(health_bp)
+
+    # Discover FFmpeg and FFprobe executables BEFORE validation, so the
+    # startup check inspects the same paths the pipeline will use.
+    ffmpeg_path = os.environ.get('FFMPEG_BIN') or shutil.which('ffmpeg')
+    ffprobe_path = os.environ.get('FFPROBE_BIN') or shutil.which('ffprobe')
+    app.config['FFMPEG_BINARY'] = ffmpeg_path or 'ffmpeg'
+    app.config['FFPROBE_BINARY'] = ffprobe_path or 'ffprobe'
+
+    enable_scheduler = str(
+        app.config.get('ENABLE_JOB_SCHEDULER', os.environ.get('ENABLE_JOB_SCHEDULER', 'true'))
+    ).lower() in ('1', 'true', 'yes')
+    testing = bool(app.config.get('TESTING', False))
+    # TESTING never runs ffmpeg: validate/start as scheduler-disabled.
+    scheduler_effective = enable_scheduler and not testing
+
+    # Fail loudly on misconfiguration — never degrade silently at request time.
+    validate_config(app, scheduler_enabled=scheduler_effective)
 
     # Initialize DB & Default Settings inside App Context
     with app.app_context():
@@ -79,35 +107,25 @@ def create_app(config_class=Config):
             db.session.add(default_cdn)
             db.session.commit()
 
-        # Discover FFmpeg and FFprobe executables (use absolute paths when available)
-        ffmpeg_path = os.environ.get('FFMPEG_BIN') or shutil.which('ffmpeg')
-        ffprobe_path = os.environ.get('FFPROBE_BIN') or shutil.which('ffprobe')
-        app.config['FFMPEG_BINARY'] = ffmpeg_path or 'ffmpeg'
-        app.config['FFPROBE_BINARY'] = ffprobe_path or 'ffprobe'
-
         # Persist discovered paths into settings for visibility (non-blocking)
         try:
             Setting.set('ffmpeg_path', ffmpeg_path or '')
             Setting.set('ffprobe_path', ffprobe_path or '')
         except Exception as exc:
-            # Do not fail startup for inability to persist settings
             log.warning("Could not persist ffmpeg paths to settings: %s", exc)
 
     # --- In-process job supervisor (replaces the standalone worker.py) ---
     # The web process owns its background work now: job polling, ffmpeg
     # supervision, CDN upload and cleanup all run on executor threads in
     # this process. Disable explicitly with ENABLE_JOB_SCHEDULER=false
-    # (e.g. for a pure test client, or all-but-one gunicorn worker if you
-    # scale past one process — the atomic claim keeps that safe anyway).
-    enable_scheduler = str(
-        app.config.get('ENABLE_JOB_SCHEDULER', os.environ.get('ENABLE_JOB_SCHEDULER', 'true'))
-    ).lower() in ('1', 'true', 'yes')
+    # (e.g. for a pure test client, or all-but-one process if you scale
+    # past one gunicorn worker — the atomic claim keeps that safe anyway).
     testing = bool(app.config.get('TESTING', False))
     supervisor = None
-    if enable_scheduler and not testing:
+    if scheduler_effective:
         from app.worker.supervisor import JobSupervisor
 
-        poll_interval = float(os.environ.get('JOB_POLL_INTERVAL', '2.0'))
+        poll_interval = float(app.config.get('JOB_POLL_INTERVAL', 2.0))
         max_workers = int(app.config.get('MAX_CONCURRENT_JOBS', 1))
         supervisor = JobSupervisor(app, poll_interval=poll_interval, max_workers=max_workers)
         supervisor.start()

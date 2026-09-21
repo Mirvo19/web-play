@@ -1,8 +1,11 @@
+import logging
 import os
 import requests
 from typing import Dict, Any, Tuple
 from urllib.parse import quote, urlparse
 from app.cdn.base import CDNProvider
+
+_logger = logging.getLogger(__name__)
 
 class HackClubCDNProvider(CDNProvider):
     """
@@ -146,16 +149,7 @@ class HackClubCDNProvider(CDNProvider):
             try:
                 tried.append(endpoint)
                 resp = requests.delete(endpoint, headers=headers, timeout=15)
-                # Optionally log response details for debugging
-                try:
-                    from flask import current_app
-                    if current_app.config.get('LOG_TO_STDOUT', False):
-                        try:
-                            print(f"[CDN DELETE] Tried {endpoint} -> {resp.status_code} | {resp.text}")
-                        except Exception:
-                            print(f"[CDN DELETE] Tried {endpoint} -> {resp.status_code}")
-                except Exception:
-                    pass
+                _logger.debug("CDN DELETE %s -> %s", endpoint, resp.status_code)
 
                 # Treat 200/204/404 as success (404 = already removed)
                 tried[-1] = {'endpoint': endpoint, 'status': resp.status_code, 'body': resp.text, 'headers': dict(resp.headers)}
@@ -173,13 +167,8 @@ class HackClubCDNProvider(CDNProvider):
                     except Exception:
                         continue
                 # do not treat 404 or HTML 200 as success
-            except Exception as e:
-                try:
-                    from flask import current_app
-                    if current_app.config.get('LOG_TO_STDOUT', False):
-                        print(f"[CDN DELETE] Exception trying {endpoint}: {e}")
-                except Exception:
-                    pass
+            except requests.RequestException as e:
+                _logger.debug("CDN DELETE %s raised %s", endpoint, e)
                 continue
 
         # Try POST-based deletion endpoint (some providers expect POST)

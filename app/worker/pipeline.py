@@ -16,6 +16,7 @@ Design invariants:
 import os
 import shutil
 import time
+import logging
 import requests
 import subprocess
 import threading
@@ -34,6 +35,8 @@ from app.worker.ffmpeg_processor import (
     build_ffmpeg_transcode_command,
     extract_thumbnail
 )
+
+_logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Job controller — per-job in-memory object for FFmpeg process handle and
@@ -219,11 +222,12 @@ def _log_job(job_id: str, message: str, level: str = 'INFO', metadata: str = Non
         job.current_message = message
     db.session.commit()
 
-    try:
-        if current_app.config.get('LOG_TO_STDOUT', False):
-            print(f"[JOB {job_id[:8]}] {level}: {formatted}")
-    except Exception:
-        pass
+    _logger.log(
+        getattr(logging, level.upper(), logging.INFO),
+        "job=%s %s",
+        job_id[:8],
+        message,
+    )
 
 
 def _update_stage(job_id: str, stage: str, step: str, progress: float,
@@ -1057,7 +1061,7 @@ def execute_video_pipeline(job_id: str):
             pass
         if work_dir and os.path.exists(work_dir):
             shutil.rmtree(work_dir, ignore_errors=True)
-        print(f"[Pipeline] Job {job_id} failed: {e}")
+        _logger.error("Job %s failed: %s", job_id, e)
 
     finally:
         ctrl.clear_process()
