@@ -21,9 +21,11 @@ TORRENT_FILE_MAX_BYTES = 5 * 1024 * 1024
 
 
 def _gate():
-    """Fail closed when the feature is off or the engine is missing."""
+    """Fail closed when the feature is off, broken, or the engine is missing."""
     if not torrent_enabled(current_app):
         return jsonify({"error": "Torrent ingestion is disabled (torrent_enabled=false)."}), 503
+    if current_app.extensions.get("torrent_coordinator") is None:
+        return jsonify({"error": "Torrent worker unavailable (check server logs)."}), 503
     if not torrent_engine.is_available():
         return jsonify({"error": "Torrent engine unavailable (aria2c not installed)."}), 503
     return None

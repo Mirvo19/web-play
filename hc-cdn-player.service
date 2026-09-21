@@ -21,10 +21,14 @@ EnvironmentFile=/opt/hc-cdn-player/.env
 RuntimeDirectory=hc-cdn-player
 RuntimeDirectoryMode=0750
 
-# Ensure log directory exists
+# Ensure log + work directories exist (quarantine sibling must exist too:
+# with ProtectSystem=strict only ReadWritePaths are writable, so an
+# unlisted /tmp/torrent-quarantine fails boot with EROFS — see #1 below)
 ExecStartPre=/bin/mkdir -p /var/log/hc-cdn-player
 ExecStartPre=/bin/chown hc-cdn:www-data /var/log/hc-cdn-player
 ExecStartPre=/bin/mkdir -p /tmp/video-processing
+ExecStartPre=/bin/mkdir -p /tmp/torrent-quarantine
+ExecStartPre=/bin/chown hc-cdn:www-data /tmp/video-processing /tmp/torrent-quarantine
 
 ExecStart=/opt/hc-cdn-player/venv/bin/gunicorn \
     --config /opt/hc-cdn-player/gunicorn.conf.py \
@@ -56,7 +60,7 @@ MemoryMax=1800M
 NoNewPrivileges=true
 PrivateTmp=false
 ProtectSystem=strict
-ReadWritePaths=/opt/hc-cdn-player /var/log/hc-cdn-player /run/hc-cdn-player /tmp/video-processing
+ReadWritePaths=/opt/hc-cdn-player /var/log/hc-cdn-player /run/hc-cdn-player /tmp/video-processing /tmp/torrent-quarantine
 
 [Install]
 WantedBy=multi-user.target

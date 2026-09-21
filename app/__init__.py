@@ -158,13 +158,22 @@ def create_app(config_class=Config):
     # Runs beside the job supervisor in the same process; the actual
     # peer-network work happens in scrubbed aria2c children (see
     # app/torrents/engine.py). Idle when torrent_enabled=false.
+    # Auxiliary subsystem: if its scratch space is unusable (e.g. a
+    # read-only quarantine path under a hardened unit), degrade to
+    # torrents-unavailable instead of killing web + supervisor boot.
     torrent_coord = None
     if scheduler_effective:
         from app.torrents.coordinator import TorrentCoordinator
 
-        torrent_coord = TorrentCoordinator(app)
-        torrent_coord.start()
-        log.info("Torrent coordinator attached to app.")
+        try:
+            torrent_coord = TorrentCoordinator(app)
+            torrent_coord.start()
+            log.info("Torrent coordinator attached to app.")
+        except Exception:
+            log.exception(
+                "Torrent coordinator failed to start; torrent ingestion "
+                "disabled, web + supervisor continuing.")
+            torrent_coord = None
     app.extensions['torrent_coordinator'] = torrent_coord
 
     def _shutdown_supervisor() -> None:

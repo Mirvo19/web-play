@@ -120,10 +120,31 @@ class SubmitTests(unittest.TestCase):
             from app.models import TorrentJob
             self.assertEqual(TorrentJob.query.count(), 0)
 
+    def test_coordinator_missing_fails_closed(self):
+        from app.torrents import engine as _eng
+
+        self.app.extensions["torrent_coordinator"] = None
+        with patch.object(_eng, "is_available", return_value=True):
+            resp = self.client.post("/api/torrents/submit",
+                                    json={"magnet": "magnet:?xt=urn:btih:abc"})
+        self.assertEqual(resp.status_code, 503)
+        self.assertIn("unavailable", resp.get_json()["error"])
+
+    def test_quarantine_base_unwritable_raises_loudly(self):
+        from app.torrents.coordinator import quarantine_base
+
+        fd, blocker = tempfile.mkstemp()
+        os.close(blocker)
+        self.addCleanup(lambda: os.path.exists(blocker) and os.remove(blocker))
+        self.app.config["TORRENT_QUARANTINE_FOLDER"] = os.path.join(blocker, "sub")
+        with self.assertRaises(OSError):
+            quarantine_base(self.app)
+
     def test_magnet_submit_ok_when_available(self):
         from app.torrents import engine as _eng
         from app.models import TorrentJob
 
+        self.app.extensions["torrent_coordinator"] = object()
         with patch.object(_eng, "is_available", return_value=True):
             resp = self.client.post("/api/torrents/submit",
                                     json={"magnet": "magnet:?xt=urn:btih:abc"})
@@ -138,6 +159,7 @@ class SubmitTests(unittest.TestCase):
         from app.torrents import engine as _eng
         from app.models import TorrentJob
 
+        self.app.extensions["torrent_coordinator"] = object()
         with patch.object(_eng, "is_available", return_value=True):
             resp = self.client.post(
                 "/api/torrents/submit",
