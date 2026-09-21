@@ -13,41 +13,83 @@
       document.documentElement.setAttribute('data-theme', t);
     })();
   </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/ops.css') }}">
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <script src="https://cdn.jsdelivr.net/npm/motion@10.18.0/dist/motion.umd.js"></script>
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">HC<span>&nbsp;CDN PLAYER</span></div>
-    <nav aria-label="Primary">
-      <a href="{{ url_for('views.dashboard') }}" class="{% if request.endpoint == 'views.dashboard' %}active{% endif %}">Videos</a>
-      <a href="{{ url_for('views.upload') }}" class="{% if request.endpoint == 'views.upload' %}active{% endif %}">Upload</a>
-      <a href="{{ url_for('views.jobs_list') }}" class="{% if request.endpoint in ('views.jobs_list', 'views.job_detail') %}active{% endif %}">Jobs</a>
-      <a href="{{ url_for('views.cdn_accounts') }}" class="{% if request.endpoint == 'views.cdn_accounts' %}active{% endif %}">CDN</a>
-      <a href="{{ url_for('views.stats') }}" class="{% if request.endpoint == 'views.stats' %}active{% endif %}">System</a>
-      <a href="{{ url_for('views.settings') }}" class="{% if request.endpoint == 'views.settings' %}active{% endif %}">Settings</a>
-    </nav>
-    <div class="spacer"></div>
-    <button type="button" class="theme-btn" id="themeToggle" title="Switch light / dark theme">Light mode</button>
-    <span class="session-badge" id="sessionBadge">session …</span>
-    <a class="logout" href="{{ url_for('auth.logout') }}">Logout</a>
-  </header>
+  <!-- Icon sprite: one style, 1.8px stroke, currentColor, 24px grid -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="i-logo" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="2" y="5" width="20" height="14" rx="3"/><polygon points="10,9 15.5,12 10,15" fill="#052e22"/></symbol>
+      <symbol id="i-film" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 4v16M17 4v16M3 9h4M3 15h4M17 9h4M17 15h4"/></symbol>
+      <symbol id="i-upload" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></symbol>
+      <symbol id="i-pulse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2.5-6 4 12L16 12h5"/></symbol>
+      <symbol id="i-globe" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.9 5.7 3.9 9S14.5 18.4 12 21c-2.5-2.6-3.9-5.7-3.9-9S9.5 5.6 12 3z"/></symbol>
+      <symbol id="i-gauge" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14a8 8 0 1 1 16 0"/><path d="M12 14l4.5-4.5"/><path d="M4 18h16"/></symbol>
+      <symbol id="i-sliders" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h9M18 7h1M5 17h3M12 17h7"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></symbol>
+      <symbol id="i-out" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h5v5M19 4l-8 8"/><path d="M19 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h6"/></symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13.5A8 8 0 0 1 10.5 4 8 8 0 1 0 20 13.5z"/></symbol>
+      <symbol id="i-play" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="7 4.5 19 12 7 19.5"/></symbol>
+      <symbol id="i-pause" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="4.5" width="4" height="15" rx="1"/><rect x="14" y="4.5" width="4" height="15" rx="1"/></symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5 5L20 6.5"/></symbol>
+      <symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.3-5.6"/><path d="M20 3v4h-4"/></symbol>
+      <symbol id="i-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12M7 11l5 5 5-5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></symbol>
+      <symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></symbol>
+      <symbol id="i-max" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"/></symbol>
+    </defs>
+  </svg>
 
-  <div class="session-warning" id="sessionWarning" style="display: none;">
-    <strong>Session expiring:</strong>
-    <span id="sessionWarningText">Session expires soon.</span>
-    <a class="btn" href="{{ url_for('auth.login_page') }}">Log in again</a>
-  </div>
+  <div class="shell">
+    <aside class="side">
+      <div class="side-brand">
+        <span class="mark"><svg class="ic-lg" aria-hidden="true"><use href="#i-logo"/></svg></span>
+        <span>HC&nbsp;CDN&nbsp;PLAYER</span>
+      </div>
+      <nav aria-label="Primary">
+        <a href="{{ url_for('views.dashboard') }}" class="{% if request.endpoint == 'views.dashboard' %}active{% endif %}"><svg class="ic" aria-hidden="true"><use href="#i-film"/></svg>Videos</a>
+        <a href="{{ url_for('views.upload') }}" class="{% if request.endpoint == 'views.upload' %}active{% endif %}"><svg class="ic" aria-hidden="true"><use href="#i-upload"/></svg>Upload</a>
+        <a href="{{ url_for('views.jobs_list') }}" class="{% if request.endpoint in ('views.jobs_list', 'views.job_detail') %}active{% endif %}"><svg class="ic" aria-hidden="true"><use href="#i-pulse"/></svg>Jobs</a>
+        <a href="{{ url_for('views.cdn_accounts') }}" class="{% if request.endpoint == 'views.cdn_accounts' %}active{% endif %}"><svg class="ic" aria-hidden="true"><use href="#i-globe"/></svg>CDN</a>
+        <a href="{{ url_for('views.stats') }}" class="{% if request.endpoint == 'views.stats' %}active{% endif %}"><svg class="ic" aria-hidden="true"><use href="#i-gauge"/></svg>System</a>
+        <a href="{{ url_for('views.settings') }}" class="{% if request.endpoint == 'views.settings' %}active{% endif %}"><svg class="ic" aria-hidden="true"><use href="#i-sliders"/></svg>Settings</a>
+      </nav>
+      <div class="side-foot">
+        <span class="session-badge" id="sessionBadge"><span class="dot" aria-hidden="true"></span><span id="sessionBadgeText">session …</span></span>
+        <button type="button" class="theme-btn" id="themeToggle"><svg class="ic" aria-hidden="true"><use href="#i-moon" id="themeIcon"/></svg><span id="themeLabel">Light mode</span></button>
+        <a class="logout" href="{{ url_for('auth.logout') }}"><svg class="ic" aria-hidden="true"><use href="#i-out"/></svg>Logout</a>
+      </div>
+    </aside>
 
-  <main class="wrap">
-    <div class="page-head">
-      <h1>{% block header_title %}Dashboard{% endblock %}</h1>
-      <span class="sub">{% block header_sub %}{% endblock %}</span>
+    <div class="main">
+      <div class="wrap">
+        <header class="page-head" data-enter>
+          <div>
+            <h1>{% block header_title %}Dashboard{% endblock %}</h1>
+            <p class="sub">{% block header_sub %}{% endblock %}</p>
+          </div>
+          <div class="page-actions">{% block page_actions %}{% endblock %}</div>
+        </header>
+
+        <div class="session-warning" id="sessionWarning" style="display: none;">
+          <svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg>
+          <span id="sessionWarningText">Session expires soon.</span>
+          <a class="btn" href="{{ url_for('auth.login_page') }}">Log in again</a>
+        </div>
+
+        {% block content %}{% endblock %}
+        <div class="footer">{{ app_version }} · single-process build · jobs run in-process</div>
+      </div>
     </div>
-    {% block content %}{% endblock %}
-    <div class="footer">{{ app_version }} · single-process build · jobs run in-process</div>
-  </main>
+  </div>
 
   {% block scripts %}{% endblock %}
 </body>

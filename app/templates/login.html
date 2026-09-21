@@ -12,18 +12,30 @@
       document.documentElement.setAttribute('data-theme', t);
     })();
   </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/ops.css') }}">
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </head>
 <body>
   <div class="login-wrap">
-    <div class="panel login-card">
-      <div class="panel-head"><h1>HC CDN PLAYER</h1><span class="pill dim">sign in</span></div>
-      <div class="panel-body">
+    <div class="panel login-card" data-enter>
+      <div class="panel-body" style="padding: 26px 24px;">
+        <div class="login-brand">
+          <span class="mark">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="2" y="5" width="20" height="14" rx="3"/><polygon points="10,9 15.5,12 10,15" fill="#052e22"/></svg>
+          </span>
+          <div>
+            <h1 style="font-size: 17px;">HC CDN Player</h1>
+            <div style="color: var(--muted); font-size: 12px;">pipeline console · sign in</div>
+          </div>
+        </div>
+
         {% if auth_mode == 'insecure-dev' %}
-        <div class="alert warn"><strong>Insecure dev mode:</strong> no real auth is configured. Any password works, loopback clients only. Do not expose this instance.</div>
+        <div class="alert warn"><strong>Insecure dev mode:</strong>&nbsp;no real auth is configured. Any password works, loopback clients only. Do not expose this instance.</div>
         {% elif auth_mode == 'disabled' %}
-        <div class="alert bad"><strong>Auth not configured:</strong> logins will be refused until Supabase is set up.</div>
+        <div class="alert bad"><strong>Auth not configured:</strong>&nbsp;logins will be refused until Supabase is set up.</div>
         {% endif %}
         <div class="alert bad" id="errorAlert" style="display: none;"></div>
         <form id="loginForm">
@@ -35,9 +47,9 @@
             <label for="password">Password</label>
             <input type="password" id="password" required autocomplete="current-password">
           </div>
-          <button type="submit" id="submitBtn" class="btn primary" style="width: 100%;">Sign in</button>
+          <button type="submit" id="submitBtn" class="btn primary" style="width: 100%; justify-content: center;">Sign in</button>
         </form>
-        <p style="color: var(--muted); font-size: 12px; text-align: center; margin-bottom: 0;">Session lasts 24 hours.</p>
+        <p style="color: var(--muted); font-size: 12px; text-align: center; margin: 14px 0 0;">Session lasts 24 hours.</p>
       </div>
     </div>
   </div>
@@ -66,16 +78,17 @@
           if (out.ok) window.location.href = '/dashboard';
           else {
             errBox.textContent = out.data.error || 'Sign in failed.';
-            errBox.style.display = 'block';
+            errBox.style.display = 'flex';
           }
         }).catch(function () {
           errBox.textContent = 'Connection error. Try again.';
-          errBox.style.display = 'block';
+          errBox.style.display = 'flex';
         }).finally(function () {
           submitBtn.disabled = false;
           submitBtn.textContent = 'Sign in';
         });
       });
+      if (window.HC) window.HC.enter(document);
     })();
   </script>
 </body>
